@@ -1,0 +1,56 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:BabelRead.App.ViewModels"
+             xmlns:domain="clr-namespace:BabelRead.Core.Domain;assembly=BabelRead.Core"
+             x:Class="BabelRead.App.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+  <ScrollViewer Padding="24">
+    <StackPanel Spacing="16" MaxWidth="560">
+      <TextBlock Text="Translation model" FontSize="20" FontWeight="SemiBold" />
+
+      <TextBlock TextWrapping="Wrap" Opacity="0.8"
+                 Text="Choose a local model (runs on your machine, no account or key) or a cloud model (needs your own API key). Consumer chat subscriptions such as GitHub Copilot or claude.ai Pro/Max cannot be used as a translation backend." />
+
+      <TextBlock Text="Available models" FontWeight="SemiBold" />
+      <ListBox Name="ProfileList" ItemsSource="{Binding Profiles}" SelectedItem="{Binding ActiveProfile}"
+               AutomationProperties.Name="Available translation models" MaxHeight="180">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="domain:ModelProfile">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding ModelId}" Opacity="0.7" />
+            </StackPanel>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+      <Button Name="UseSelectedButton" Content="Use selected model"
+              AutomationProperties.Name="Use the selected model" />
+
+      <Separator />
+
+      <TextBlock Text="Languages" FontSize="20" FontWeight="SemiBold" />
+      <TextBlock Text="Translate into (language code, e.g. en, fr, de)" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBox Name="TargetLanguage" Width="120" PlaceholderText="en" />
+        <Button Name="ApplyTargetButton" Content="Apply"
+                AutomationProperties.Name="Apply target language" />
+      </StackPanel>
+      <TextBlock Text="Override detected source language (optional; blank = auto-detect)" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBox Name="SourceOverride" Width="120" PlaceholderText="auto" />
+        <Button Name="ApplySourceButton" Content="Apply"
+                AutomationProperties.Name="Apply source language override" />
+      </StackPanel>
+
+      <Separator />
+
+      <TextBlock Text="Add a cloud model" FontSize="20" FontWeight="SemiBold" />
+      <TextBox Name="CloudName" PlaceholderText="Display name (e.g. OpenAI)" />
+      <TextBox Name="CloudModelId" PlaceholderText="Model id (e.g. gpt-4o-mini)" />
+      <TextBox Name="CloudEndpoint" PlaceholderText="Endpoint (optional, e.g. Azure resource URL)" />
+      <TextBox Name="CloudApiKey" PlaceholderText="API key" PasswordChar="•" />
+      <Button Name="AddCloudButton" Content="Add cloud model"
+              AutomationProperties.Name="Add a cloud model" />
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

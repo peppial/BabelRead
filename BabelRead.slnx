@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BabelRead.App/BabelRead.App.csproj" />
+    <Project Path="src/BabelRead.Core/BabelRead.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BabelRead.App.Tests/BabelRead.App.Tests.csproj" />
+    <Project Path="tests/BabelRead.Core.Tests/BabelRead.Core.Tests.csproj" />
+    <Project Path="tests/BabelRead.Integration.Tests/BabelRead.Integration.Tests.csproj" />
+    <Project Path="tests/BabelRead.TestSupport/BabelRead.TestSupport.csproj" />
+  </Folder>
+</Solution>

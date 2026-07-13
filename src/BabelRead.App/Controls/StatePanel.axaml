@@ -1,0 +1,14 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="BabelRead.App.Controls.StatePanel">
+  <Border Padding="24" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" MaxWidth="420">
+      <TextBlock Name="MessageText"
+                 TextWrapping="Wrap" TextAlignment="Center"
+                 FontSize="15" Opacity="0.85" />
+      <Button Name="RetryButton" Content="Retry"
+              HorizontalAlignment="Center" IsVisible="False"
+              AutomationProperties.Name="Retry translation" />
+    </StackPanel>
+  </Border>
+</UserControl>

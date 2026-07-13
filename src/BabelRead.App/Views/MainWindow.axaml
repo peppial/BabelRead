@@ -1,0 +1,7 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="BabelRead.App.Views.MainWindow"
+        Title="BabelRead" Width="1000" Height="720"
+        MinWidth="640" MinHeight="480">
+  <ContentControl Name="RootContent" />
+</Window>

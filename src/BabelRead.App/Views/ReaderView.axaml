@@ -1,0 +1,52 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:BabelRead.App.ViewModels"
+             xmlns:controls="clr-namespace:BabelRead.App.Controls"
+             x:Class="BabelRead.App.Views.ReaderView"
+             x:DataType="vm:ReaderViewModel">
+  <DockPanel>
+    <!-- Toolbar -->
+    <Border DockPanel.Dock="Top" Padding="12,8" Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button Name="OpenButton" Content="Open…"
+                  AutomationProperties.Name="Open a PDF or EPUB" />
+          <TextBlock Text="{Binding Title}" VerticalAlignment="Center"
+                     FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="360" />
+          <TextBlock Text="{Binding TranslationPercentLabel}" VerticalAlignment="Center" Opacity="0.8"
+                     AutomationProperties.Name="Translation percent" />
+        </StackPanel>
+
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button Content="◀" Command="{Binding PreviousPageCommand}" IsEnabled="{Binding CanGoPrevious}"
+                  AutomationProperties.Name="Previous page" />
+          <TextBlock VerticalAlignment="Center" MinWidth="80" TextAlignment="Center"
+                     Text="{Binding CurrentPageLabel}" />
+          <Button Content="▶" Command="{Binding NextPageCommand}" IsEnabled="{Binding CanGoNext}"
+                  AutomationProperties.Name="Next page" />
+          <Button Content="{Binding ToggleLabel}" Command="{Binding ToggleViewCommand}"
+                  AutomationProperties.Name="Toggle between original and translation" />
+          <Button Name="SettingsButton" Content="⚙"
+                  AutomationProperties.Name="Settings" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Reading surface -->
+    <Panel Margin="0">
+      <ScrollViewer Name="ReadingScroll" IsVisible="{Binding IsContentVisible}" Padding="32,24">
+        <SelectableTextBlock Name="PageText" Text="{Binding DisplayText}"
+                             FlowDirection="{Binding ReadingFlowDirection}"
+                             AutomationProperties.Name="Page text"
+                             TextWrapping="Wrap"
+                             FontSize="{Binding ReadingFontSize}" LineHeight="{Binding ReadingLineHeight}"
+                             HorizontalAlignment="Stretch" />
+      </ScrollViewer>
+
+      <controls:StatePanel IsVisible="{Binding IsStatusVisible}"
+                           Message="{Binding StatusMessage}"
+                           ShowRetry="{Binding ShowRetry}"
+                           RetryCommand="{Binding RetryCommand}" />
+    </Panel>
+  </DockPanel>
+</UserControl>
