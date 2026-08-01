@@ -56,6 +56,41 @@ public sealed class EpubDocumentReaderTests : IDisposable
     }
 
     [Fact]
+    public async Task A_table_of_contents_is_coalesced_into_few_segments_not_one_per_line()
+    {
+        // 200 short entries as separate paragraphs — like a real EPUB table of contents. Each segment is
+        // one (paid) translation call, so these must be merged rather than translated one line at a time.
+        var entries = Enumerable.Range(1, 200).Select(i => $"Chapter {i}");
+        var toc = string.Join("</p><p>", entries); // CreateEpub wraps the body in a single <p>…</p>
+        var path = SampleDocuments.CreateEpub(Path.Combine(_dir, "toc.epub"), "TOC", "en", toc);
+        using var reader = new EpubDocumentReader();
+
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        // Segments are the translation units for the whole book; 200 one-line entries must not become
+        // 200 of them. (~2000 chars of contents coalesces to a small handful.)
+        Assert.True(doc.Segments.Count < 20,
+            $"a 200-line contents section should coalesce into a handful of segments, but produced {doc.Segments.Count}");
+        var allText = string.Join("\n", doc.Segments);
+        Assert.Contains("Chapter 1", allText, StringComparison.Ordinal);
+        Assert.Contains("Chapter 200", allText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ordinary_paragraphs_are_not_merged_together()
+    {
+        // Two full-length paragraphs (each well past the merge threshold) must stay as separate segments.
+        var p1 = string.Join(" ", Enumerable.Repeat("First paragraph sentence.", 20));
+        var p2 = string.Join(" ", Enumerable.Repeat("Second paragraph sentence.", 20));
+        var path = SampleDocuments.CreateEpub(Path.Combine(_dir, "prose.epub"), "Prose", "en", $"{p1}</p><p>{p2}");
+        using var reader = new EpubDocumentReader();
+
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        Assert.Equal(2, doc.Segments.Count);
+    }
+
+    [Fact]
     public async Task Extracts_plain_text_from_html_body()
     {
         var path = SampleDocuments.CreateEpub(Path.Combine(_dir, "b.epub"), "T", "en", "Hello <b>bold</b> world");

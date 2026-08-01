@@ -7,19 +7,23 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BabelRead.Core.Translation;
 
 /// <summary>
-/// Translates one page into the target language via the active model client. Short-circuits when the
-/// (known) source equals the target, and returns a <see cref="TranslationStatus.Failed"/> result — never
-/// throws to the caller — on model/network error. The result's <see cref="PageTranslation.PageIndex"/>
-/// always matches the source page (FR-010).
+/// Translates a page one segment (paragraph) at a time, reusing anything the store already holds and
+/// persisting each segment the moment it is produced. Translating in segments is what makes the work
+/// durable: segments are keyed by their own text, so re-cutting the book into different pages never
+/// throws any of it away, and a page abandoned half-way still banks the paragraphs it finished.
+/// Short-circuits when the (known) source equals the target, and returns a
+/// <see cref="TranslationStatus.Failed"/> result — never throws to the caller — on model/network error.
 /// </summary>
 public sealed class TranslationService : ITranslationService
 {
     private readonly IChatClientFactory _clientFactory;
+    private readonly ITranslationStore _store;
     private readonly ILogger<TranslationService> _logger;
 
-    public TranslationService(IChatClientFactory clientFactory, ILogger<TranslationService>? logger = null)
+    public TranslationService(IChatClientFactory clientFactory, ITranslationStore store, ILogger<TranslationService>? logger = null)
     {
         _clientFactory = clientFactory;
+        _store = store;
         _logger = logger ?? NullLogger<TranslationService>.Instance;
     }
 
@@ -49,23 +53,53 @@ public sealed class TranslationService : ITranslationService
             return PageTranslation.Completed(page.Index, target, source, model.ModelId, page.ExtractableText, origin);
         }
 
+        var translated = new string[page.Segments.Count];
+        for (var i = 0; i < page.Segments.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var segment = page.Segments[i];
+            var key = TranslationKey.For(segment, source, target, model.ModelId);
+            if (_store.TryGet(key, out var cached))
+            {
+                translated[i] = cached;
+                continue;
+            }
+
+            var result = await TranslateSegmentAsync(segment, source, target, model, ct).ConfigureAwait(false);
+            if (result.Failure is { } failure)
+            {
+                return PageTranslation.Failed(page.Index, target, model.ModelId, failure, origin);
+            }
+
+            translated[i] = result.Text!;
+            await _store.SaveAsync(key, result.Text!, ct).ConfigureAwait(false);
+        }
+
+        return PageTranslation.Completed(page.Index, target, source, model.ModelId, string.Join("\n\n", translated), origin);
+    }
+
+    private async Task<(string? Text, string? Failure)> TranslateSegmentAsync(
+        string segment,
+        LanguageCode source,
+        LanguageCode target,
+        ModelProfile model,
+        CancellationToken ct)
+    {
         try
         {
-            var messages = BuildMessages(page.ExtractableText, source, target);
+            var messages = BuildMessages(segment, source, target);
             var response = await GetResponseWithLocalLatestFallbackAsync(model, messages, ct).ConfigureAwait(false);
             var text = response.Text;
 
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                return PageTranslation.Failed(page.Index, target, model.ModelId, "The model returned an empty translation.", origin);
-            }
-
-            return PageTranslation.Completed(page.Index, target, source, model.ModelId, text, origin);
+            return string.IsNullOrWhiteSpace(text)
+                ? (null, "The model returned an empty translation.")
+                : (text, null);
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
         {
-            _logger.LogWarning(ex, "Translation request timed out for page {Page} with model {Model}.", page.Index, model.ModelId);
-            return PageTranslation.Failed(page.Index, target, model.ModelId, "The translation timed out. Try again.", origin);
+            _logger.LogWarning(ex, "Translation request timed out with model {Model}.", model.ModelId);
+            return (null, "The translation timed out. Try again.");
         }
         catch (OperationCanceledException)
         {
@@ -73,8 +107,8 @@ public sealed class TranslationService : ITranslationService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Translation failed for page {Page} with model {Model}.", page.Index, model.ModelId);
-            return PageTranslation.Failed(page.Index, target, model.ModelId, DescribeFailure(ex), origin);
+            _logger.LogWarning(ex, "Translation failed with model {Model}.", model.ModelId);
+            return (null, DescribeFailure(ex));
         }
     }
 

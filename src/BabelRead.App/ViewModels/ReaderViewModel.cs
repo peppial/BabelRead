@@ -20,9 +20,19 @@ namespace BabelRead.App.ViewModels;
 /// </summary>
 public sealed partial class ReaderViewModel : ObservableObject
 {
+    /// <summary>Fraction of the page the paginator aims to fill, leaving the rest free for a translation
+    /// that runs longer than its source text — the reserve that keeps pages from overflowing into a scroll.
+    /// Kept fairly generous: most target languages run only modestly longer than the source, so reserving
+    /// too much just leaves the window looking half-empty. A page that does overflow simply scrolls.</summary>
+    private const double TranslationGrowthAllowance = 0.8;
+
+    /// <summary>Fallback reading surface, used only before the view has reported its real size.</summary>
+    private const double BaselineLayoutWidth = 1280;
+    private const double BaselineLayoutHeight = 800;
+
     private readonly DocumentReaderRegistry _readers;
     private readonly ITranslationService _translation;
-    private readonly ITranslationCache _cache;
+    private readonly ITranslationStore _store;
     private readonly IPrefetchCoordinator _prefetch;
     private readonly IPreferencesStore _preferences;
     private readonly ILogger<ReaderViewModel> _logger;
@@ -36,9 +46,15 @@ public sealed partial class ReaderViewModel : ObservableObject
     private double _viewportWidth;
     private double _viewportHeight;
     private CancellationTokenSource? _pageCts;
-    private readonly Dictionary<string, PageTranslation> _persistedTranslations = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _preferencesGate = new(1, 1);
-    private bool _suppressPersistenceFromCacheEvents;
+    private readonly SynchronizationContext? _uiContext = SynchronizationContext.Current;
+
+    // Continuous reading model: the whole document is rendered as one flow so every screen fills top to
+    // bottom and a paragraph runs on across the page break (like a printed book). Core "pages" survive only
+    // as translation/navigation anchors — turning a page scrolls this flow to that page's first paragraph.
+    private IReadOnlyList<string> _orderedSegments = [];      // every paragraph, in reading order
+    private int[] _segmentCharOffsets = [];                    // where each paragraph starts in DisplayText
+    private int[] _pageFirstSegment = [];                      // first paragraph index of each Core page
 
     [ObservableProperty]
     private string _title = "BabelRead";
@@ -53,22 +69,32 @@ public sealed partial class ReaderViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(DisplayText))]
+    [NotifyPropertyChangedFor(nameof(IsContentVisible))]
+    [NotifyPropertyChangedFor(nameof(IsStatusVisible))]
+    [NotifyPropertyChangedFor(nameof(IsTranslatingFallbackVisible))]
     private string? _originalText;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(DisplayText))]
+    [NotifyPropertyChangedFor(nameof(IsContentVisible))]
+    [NotifyPropertyChangedFor(nameof(IsStatusVisible))]
+    [NotifyPropertyChangedFor(nameof(IsTranslatingFallbackVisible))]
     private string? _translationText;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(DisplayText))]
     [NotifyPropertyChangedFor(nameof(ToggleLabel))]
     [NotifyPropertyChangedFor(nameof(ReadingFlowDirection))]
+    [NotifyPropertyChangedFor(nameof(IsContentVisible))]
+    [NotifyPropertyChangedFor(nameof(IsStatusVisible))]
+    [NotifyPropertyChangedFor(nameof(IsTranslatingFallbackVisible))]
     private bool _showingTranslation = true;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsContentVisible))]
     [NotifyPropertyChangedFor(nameof(IsStatusVisible))]
     [NotifyPropertyChangedFor(nameof(ShowRetry))]
+    [NotifyPropertyChangedFor(nameof(IsTranslatingFallbackVisible))]
     private ReaderState _state = ReaderState.NoDocument;
 
     [ObservableProperty]
@@ -80,36 +106,55 @@ public sealed partial class ReaderViewModel : ObservableObject
     [ObservableProperty]
     private bool _canGoPrevious;
 
+    /// <summary>Segments of this book translated into the active language with the active model.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(TranslationPercentLabel))]
-    private int _translatedPages;
+    private int _translatedSegments;
+
+    /// <summary>Segments in the book — the denominator behind the percentage.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TranslationPercentLabel))]
+    private int _totalSegments;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TranslationPercentLabel))]
     private double _translationProgressPercent;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ReadingLineHeight))]
     private double _readingFontSize = ReadingFontSizes.Default;
 
+    /// <summary>How hard the background translator may work — the reader's heat/speed dial.</summary>
+    [ObservableProperty]
+    private BackgroundTranslation _backgroundTranslation = BackgroundTranslation.Gentle;
+
     public ReaderViewModel(
         DocumentReaderRegistry readers,
         ITranslationService translation,
-        ITranslationCache cache,
+        ITranslationStore store,
         IPrefetchCoordinator prefetch,
         IPreferencesStore preferences,
         ILogger<ReaderViewModel>? logger = null)
     {
         _readers = readers;
         _translation = translation;
-        _cache = cache;
+        _store = store;
         _prefetch = prefetch;
         _preferences = preferences;
         _logger = logger ?? NullLogger<ReaderViewModel>.Instance;
-        _cache.EntryStored += OnCacheEntryStored;
+        _store.SegmentStored += OnSegmentStored;
     }
 
-    /// <summary>Text shown in the reading pane, honouring the original/translation toggle (FR-013).</summary>
-    public string? DisplayText => ShowingTranslation ? TranslationText : OriginalText;
+    /// <summary>The whole document as one continuous flow — each paragraph translated where the store holds
+    /// it, shown in the original otherwise — so the reading pane always fills top to bottom and a paragraph
+    /// runs on across page breaks (FR-013). Rebuilt as translations land and when the toggle flips.</summary>
+    [ObservableProperty]
+    private string? _displayText;
+
+    /// <summary>Character offset the view brings to the top of the reading pane. Set on navigation so a page
+    /// turn scrolls the continuous flow to that page's first paragraph.</summary>
+    [ObservableProperty]
+    private int _readingCharOffset;
 
     /// <summary>Right-to-left when showing a translation into an RTL language (Arabic, Hebrew, ...).</summary>
     public Avalonia.Media.FlowDirection ReadingFlowDirection =>
@@ -123,16 +168,34 @@ public sealed partial class ReaderViewModel : ObservableObject
     /// <summary>Label for the toggle control.</summary>
     public string ToggleLabel => ShowingTranslation ? "Show original" : "Show translation";
 
-    public bool IsContentVisible => State == ReaderState.Content;
+    public bool IsContentVisible => State == ReaderState.Content || IsTranslatingFallbackVisible;
 
-    public bool IsStatusVisible => State is ReaderState.Loading or ReaderState.NoText or ReaderState.Error or ReaderState.NoDocument;
+    public bool IsStatusVisible =>
+        State == ReaderState.Loading ? !IsTranslatingFallbackVisible :
+        State is ReaderState.NoText or ReaderState.Error or ReaderState.NoDocument;
 
     public bool ShowRetry => State == ReaderState.Error;
 
+    public bool IsTranslatingFallbackVisible =>
+        State == ReaderState.Loading
+        && ShowingTranslation
+        && !string.IsNullOrWhiteSpace(OriginalText)
+        && string.IsNullOrWhiteSpace(TranslationText);
+
     public string CurrentPageLabel => $"Page {PageNumber}/{PageCount}";
 
-    public string TranslationPercentLabel =>
-        $"{(PageCount <= 0 || TranslatedPages <= 0 ? 0 : Math.Clamp((int)Math.Ceiling((double)TranslatedPages * 100d / PageCount), 1, 100))}% translated";
+    /// <summary>Percentage plus the raw counts: a segment is worth a fraction of a percent, so the number
+    /// alone looks frozen even while the model is working steadily.</summary>
+    public string TranslationPercentLabel
+    {
+        get
+        {
+            var percent = TranslationProgressPercent <= 0 ? 0 : Math.Clamp((int)Math.Ceiling(TranslationProgressPercent), 1, 100);
+            return TotalSegments <= 0
+                ? "0% translated"
+                : $"{percent}% translated ({TranslatedSegments}/{TotalSegments})";
+        }
+    }
 
     /// <summary>The active model profile (updated by Settings in US2); later translations use it.</summary>
     public ModelProfile ActiveModel
@@ -188,17 +251,9 @@ public sealed partial class ReaderViewModel : ObservableObject
 
         if (_document is not null)
         {
-            await UpdatePreferencesAsync(
-                prefs =>
-                {
-                    LanguageResolver.SetOverride(prefs, _document.Id, _sourceOverride);
-                    prefs.TranslationCacheByDocument.Remove(_document.Id); // source changes invalidate stored translations for this book
-                }).ConfigureAwait(true);
+            await UpdatePreferencesAsync(prefs => LanguageResolver.SetOverride(prefs, _document.Id, _sourceOverride))
+                .ConfigureAwait(true);
 
-            // The source language affects every page, and the cache key does not include it, so
-            // invalidate cached translations before re-translating.
-            _cache.Clear();
-            _persistedTranslations.Clear();
             _prefetch.CancelPending();
             await GoToPageAsync(_currentIndex, ReadingDirection.Forward).ConfigureAwait(true);
         }
@@ -215,14 +270,46 @@ public sealed partial class ReaderViewModel : ObservableObject
 
         ShowingTranslation = prefs.PaneToggleDefault == PaneView.Translation;
         ReadingFontSize = ReadingFontSizes.Clamp(prefs.ReadingFontSize);
+        BackgroundTranslation = prefs.BackgroundTranslation;
+        _prefetch.Mode = prefs.BackgroundTranslation;
         if (!string.IsNullOrWhiteSpace(prefs.LastOpenedDocumentPath) && File.Exists(prefs.LastOpenedDocumentPath))
         {
-            await OpenInternalAsync(prefs.LastOpenedDocumentPath, restoreLastReadPage: true).ConfigureAwait(true);
+            await OpenInternalAsync(prefs.LastOpenedDocumentPath).ConfigureAwait(true);
         }
     }
 
+    /// <summary>Set the background-translation mode from a string (the reader's AA popover buttons).</summary>
     [RelayCommand]
-    public Task OpenAsync(string path) => OpenInternalAsync(path, restoreLastReadPage: false);
+    private Task SetBackgroundMode(string mode) =>
+        Enum.TryParse<BackgroundTranslation>(mode, out var parsed)
+            ? SetBackgroundTranslationAsync(parsed)
+            : Task.CompletedTask;
+
+    /// <summary>Apply and persist the background-translation mode. Off stops the whole-book work already in
+    /// flight but still keeps the next couple of pages ready.</summary>
+    public async Task SetBackgroundTranslationAsync(BackgroundTranslation mode)
+    {
+        BackgroundTranslation = mode;
+        _prefetch.Mode = mode;
+        await UpdatePreferencesAsync(prefs => prefs.BackgroundTranslation = mode).ConfigureAwait(true);
+
+        // Re-schedule under the new mode without waiting for the next page turn — every mode, Off included,
+        // does at least a short read-ahead.
+        if (_document is not null)
+        {
+            SchedulePrefetch(ReadingDirection.Forward);
+        }
+    }
+
+    /// <summary>Startup failed outright — say so instead of leaving the reader on "Opening…" forever.</summary>
+    public void ShowStartupFailure(string message)
+    {
+        State = ReaderState.Error;
+        StatusMessage = string.IsNullOrWhiteSpace(message) ? "Could not start the reader." : message;
+    }
+
+    [RelayCommand]
+    public Task OpenAsync(string path) => OpenInternalAsync(path);
 
     public async Task ReflowForViewportAsync(double viewportWidth, double viewportHeight)
     {
@@ -234,10 +321,16 @@ public sealed partial class ReaderViewModel : ObservableObject
             return;
         }
 
-        // A larger font fits less text, so shrink the viewport the pagination heuristic sees.
+        // A larger font fits less text, so shrink the viewport the pagination heuristic sees. Shrink it
+        // again by a safety margin: pages are measured in source characters, but what gets displayed is
+        // the translation, which is usually longer (and paragraph gaps cost height no character count
+        // sees). Without the margin a page that "fits" as English overflows once translated.
         var fontScale = ReadingFontSizes.PaginationBaseline / ReadingFontSize;
+        var effectiveWidth = viewportWidth * fontScale;
+        var effectiveHeight = viewportHeight * fontScale * TranslationGrowthAllowance;
+
         if (_reader is not IReflowableDocumentReader reflowable
-            || !reflowable.UpdateViewport(viewportWidth * fontScale, viewportHeight * fontScale))
+            || !reflowable.UpdateViewport(effectiveWidth, effectiveHeight))
         {
             return;
         }
@@ -252,7 +345,7 @@ public sealed partial class ReaderViewModel : ObservableObject
         await GoToPageAsync(mappedIndex, ReadingDirection.Forward).ConfigureAwait(true);
     }
 
-    private async Task OpenInternalAsync(string path, bool restoreLastReadPage)
+    private async Task OpenInternalAsync(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -261,9 +354,11 @@ public sealed partial class ReaderViewModel : ObservableObject
 
         _prefetch.CancelPending();
         (_reader as IDisposable)?.Dispose();
-        _cache.Clear();
-        _persistedTranslations.Clear();
         UpdateTranslationProgress();
+        OriginalText = null;
+        TranslationText = null;
+        State = ReaderState.Loading;
+        StatusMessage = "Opening…";
 
         try
         {
@@ -271,11 +366,16 @@ public sealed partial class ReaderViewModel : ObservableObject
             _document = await _reader.OpenAsync(path, CancellationToken.None).ConfigureAwait(true);
             Title = _document.Title;
             PageCount = _document.PageCount;
+            await _store.OpenAsync(_document.Id).ConfigureAwait(true); // everything this book has ever had translated
             var prefs = await UpdatePreferencesAsync(p => p.LastOpenedDocumentPath = path).ConfigureAwait(true);
             _sourceOverride = LanguageResolver.GetOverride(prefs, _document.Id);
-            LoadPersistedTranslations(_document, prefs);
+            await MigrateLegacyPageTranslationsAsync(_document, prefs).ConfigureAwait(true);
             UpdateTranslationProgress();
-            var startIndex = restoreLastReadPage && prefs.LastReadPageByDocument.TryGetValue(_document.Id, out var savedIndex)
+            // Build the continuous reading flow (and the page anchors it scrolls to) before showing a page,
+            // so the pane has text to render and GoToPageAsync can resolve the start page's char offset.
+            await BuildReadingModelAsync(CancellationToken.None).ConfigureAwait(true);
+            // Resume where this book was last left off, however it was opened (FR: per-book reading position).
+            var startIndex = prefs.LastReadPageByDocument.TryGetValue(_document.Id, out var savedIndex)
                 ? Math.Clamp(savedIndex, 0, _document.PageCount - 1)
                 : 0;
             await GoToPageAsync(startIndex, ReadingDirection.Forward).ConfigureAwait(true);
@@ -289,13 +389,16 @@ public sealed partial class ReaderViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    // AllowConcurrentExecutions: without it the generated async command reports CanExecute = false for as
+    // long as a page is translating, which greys the toolbar button out mid-translation. Turning a page
+    // already cancels the in-flight one (_pageCts), so overlapping calls are safe.
+    [RelayCommand(AllowConcurrentExecutions = true)]
     public Task NextPageAsync() =>
         _document is null || _currentIndex + 1 >= _document.PageCount
             ? Task.CompletedTask
             : GoToPageAsync(_currentIndex + 1, ReadingDirection.Forward);
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = true)]
     public Task PreviousPageAsync() =>
         _document is null || _currentIndex - 1 < 0
             ? Task.CompletedTask
@@ -346,7 +449,7 @@ public sealed partial class ReaderViewModel : ObservableObject
     public Task RetryAsync() =>
         _document is null ? Task.CompletedTask : GoToPageAsync(_currentIndex, ReadingDirection.Forward);
 
-    private async Task GoToPageAsync(int index, ReadingDirection direction)
+    private async Task GoToPageAsync(int index, ReadingDirection direction, bool scrollIntoView = true)
     {
         if (_document is null || _reader is null)
         {
@@ -361,8 +464,13 @@ public sealed partial class ReaderViewModel : ObservableObject
         _currentIndex = index;
         PageNumber = index + 1;
         UpdateNavigation();
-        State = ReaderState.Loading;
-        StatusMessage = "Translating…";
+
+        // Scroll the continuous flow to this page's first paragraph (except when this call was itself
+        // triggered by the reader scrolling there manually).
+        if (scrollIntoView)
+        {
+            ReadingCharOffset = PageStartCharOffset(index);
+        }
 
         try
         {
@@ -373,19 +481,22 @@ public sealed partial class ReaderViewModel : ObservableObject
             }
 
             OriginalText = page.ExtractableText;
-            await PersistLastReadPageAsync(page.Index).ConfigureAwait(true);
+            TranslationText = null; // the previous page's translation must not linger over this one
 
             if (!page.HasText)
             {
-                TranslationText = null;
                 State = ReaderState.NoText;
                 StatusMessage = "This page has no text to translate.";
             }
             else
             {
+                // Enters the translating state only if the page is not already translated, so turning to
+                // a cached page shows its text with no flash of "Translating…".
                 await TranslateCurrentAsync(page, token).ConfigureAwait(true);
             }
 
+            // After the page is on screen: neither the reader nor the view waits on this file write.
+            await PersistLastReadPageAsync(page.Index).ConfigureAwait(true);
             SchedulePrefetch(direction);
         }
         catch (OperationCanceledException)
@@ -405,22 +516,18 @@ public sealed partial class ReaderViewModel : ObservableObject
 
     private async Task TranslateCurrentAsync(Page page, CancellationToken token)
     {
-        var key = new TranslationKey(_document!.Id, page.Index, _target, _model.ModelId);
-        if (_cache.TryGet(key, out var cached))
-        {
-            ApplyTranslation(cached, page.Index, token);
-            return;
-        }
+        var document = _document!;
 
-        if (TryGetPersistedTranslation(key, out var persisted))
+        // The store already has every paragraph of this page → nothing to wait for; the service will
+        // assemble it from what is on disk without touching the model.
+        if (!IsFullyTranslated(page))
         {
-            CacheWithoutPersisting(persisted, key);
-            ApplyTranslation(persisted, page.Index, token);
-            return;
+            State = ReaderState.Loading;
+            StatusMessage = "Translating…";
         }
 
         var result = await _translation
-            .TranslateAsync(_document, page, _target, _sourceOverride, _model, TranslationOrigin.OnDemand, token)
+            .TranslateAsync(document, page, _target, _sourceOverride, _model, TranslationOrigin.OnDemand, token)
             .ConfigureAwait(true);
 
         if (token.IsCancellationRequested || result.PageIndex != _currentIndex)
@@ -428,13 +535,16 @@ public sealed partial class ReaderViewModel : ObservableObject
             return; // stale — belongs to a page we've navigated away from (FR-010)
         }
 
-        if (result.Status == TranslationStatus.Completed)
-        {
-            _cache.Set(key, result);
-        }
-
         ApplyTranslation(result, page.Index, token);
     }
+
+    private bool IsFullyTranslated(Page page) =>
+        page.Segments.Count > 0
+        && page.Segments.All(s => _store.Contains(TranslationKey.For(s, ResolvedSource, _target, _model.ModelId)));
+
+    /// <summary>The source language a translation is actually made from — the override if set, else what
+    /// the document declares. Part of the key, so overriding it re-translates rather than reusing.</summary>
+    private LanguageCode ResolvedSource => _sourceOverride ?? _document?.DetectedSourceLanguage ?? LanguageCode.Unknown;
 
     private void ApplyTranslation(PageTranslation result, int pageIndex, CancellationToken token)
     {
@@ -448,6 +558,8 @@ public sealed partial class ReaderViewModel : ObservableObject
             TranslationText = result.Text;
             State = ReaderState.Content;
             StatusMessage = null;
+            // Fold the freshly translated paragraphs into the continuous flow so the pane shows them.
+            BuildContinuousText();
         }
         else
         {
@@ -481,147 +593,292 @@ public sealed partial class ReaderViewModel : ObservableObject
         CanGoNext = _document is not null && _currentIndex + 1 < _document.PageCount;
     }
 
-    private void OnCacheEntryStored(object? sender, TranslationCachedEventArgs e)
+    /// <summary>Sets up the continuous reading flow for a freshly opened (or repaginated) document: the
+    /// ordered paragraphs and the first paragraph of each Core page, then the flow text itself.</summary>
+    private async Task BuildReadingModelAsync(CancellationToken ct)
     {
-        if (_document is null)
+        if (_document is null || _reader is null)
         {
+            _orderedSegments = [];
+            _pageFirstSegment = [];
+            _segmentCharOffsets = [];
+            DisplayText = null;
             return;
         }
 
-        if (!string.Equals(e.Key.DocumentId, _document.Id, StringComparison.OrdinalIgnoreCase))
+        _orderedSegments = _document.Segments;
+
+        // Walk the pages in order to learn which paragraph each one begins at — the anchor a page turn
+        // scrolls to. (The union of every page's segments is exactly the document's ordered segments.)
+        var firsts = new int[_document.PageCount];
+        var running = 0;
+        for (var p = 0; p < _document.PageCount; p++)
         {
-            return;
+            ct.ThrowIfCancellationRequested();
+            firsts[p] = Math.Clamp(running, 0, Math.Max(0, _orderedSegments.Count - 1));
+            running += (await _reader.GetPageAsync(_document, p, ct).ConfigureAwait(true)).Segments.Count;
         }
 
-        if (!_suppressPersistenceFromCacheEvents && e.Value.Status == TranslationStatus.Completed)
-        {
-            PersistCompletedTranslationAsync(e.Value).GetAwaiter().GetResult();
-        }
-
-        UpdateTranslationProgress();
+        _pageFirstSegment = firsts;
+        BuildContinuousText();
     }
 
+    /// <summary>Rebuilds the flow text from the store — each paragraph translated where held, original
+    /// otherwise — and records where each paragraph starts so the view can scroll to a page's anchor.</summary>
+    private void BuildContinuousText()
+    {
+        if (_orderedSegments.Count == 0)
+        {
+            _segmentCharOffsets = [];
+            DisplayText = null;
+            return;
+        }
+
+        var source = ResolvedSource;
+        var offsets = new int[_orderedSegments.Count];
+        var builder = new System.Text.StringBuilder();
+        for (var i = 0; i < _orderedSegments.Count; i++)
+        {
+            offsets[i] = builder.Length;
+            var paragraph = _orderedSegments[i];
+            if (ShowingTranslation
+                && _store.TryGet(TranslationKey.For(paragraph, source, _target, _model.ModelId), out var translated)
+                && !string.IsNullOrWhiteSpace(translated))
+            {
+                builder.Append(translated);
+            }
+            else
+            {
+                builder.Append(paragraph);
+            }
+
+            if (i < _orderedSegments.Count - 1)
+            {
+                builder.Append("\n\n");
+            }
+        }
+
+        _segmentCharOffsets = offsets;
+        DisplayText = builder.ToString();
+    }
+
+    /// <summary>Char offset in <see cref="DisplayText"/> where a Core page begins.</summary>
+    private int PageStartCharOffset(int pageIndex)
+    {
+        if (_pageFirstSegment.Length == 0 || _segmentCharOffsets.Length == 0)
+        {
+            return 0;
+        }
+
+        var segment = _pageFirstSegment[Math.Clamp(pageIndex, 0, _pageFirstSegment.Length - 1)];
+        return _segmentCharOffsets[Math.Clamp(segment, 0, _segmentCharOffsets.Length - 1)];
+    }
+
+    /// <summary>The view reports the paragraph now at the top of the reading pane (as a char offset); we
+    /// map it to the owning Core page and translate/prefetch around it, without scrolling back.</summary>
+    public Task OnScrolledToCharOffsetAsync(int charOffset)
+    {
+        if (_document is null || _pageFirstSegment.Length == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        var segment = SegmentIndexAtOffset(charOffset);
+        var page = PageForSegment(segment);
+        if (page == _currentIndex)
+        {
+            return Task.CompletedTask;
+        }
+
+        var direction = page >= _currentIndex ? ReadingDirection.Forward : ReadingDirection.Backward;
+        return GoToPageAsync(page, direction, scrollIntoView: false);
+    }
+
+    private int SegmentIndexAtOffset(int charOffset)
+    {
+        var i = Array.BinarySearch(_segmentCharOffsets, charOffset);
+        if (i >= 0)
+        {
+            return i;
+        }
+
+        return Math.Clamp(~i - 1, 0, _segmentCharOffsets.Length - 1);
+    }
+
+    private int PageForSegment(int segmentIndex)
+    {
+        // The last page whose first segment is <= segmentIndex.
+        var page = 0;
+        for (var p = 0; p < _pageFirstSegment.Length; p++)
+        {
+            if (_pageFirstSegment[p] <= segmentIndex)
+            {
+                page = p;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return page;
+    }
+
+    partial void OnShowingTranslationChanged(bool value) => BuildContinuousText();
+
+    /// <summary>
+    /// A segment was translated — possibly by the background prefetch, on its own thread. Refresh
+    /// progress on the UI thread; the store itself has already persisted the segment.
+    /// </summary>
+    private void OnSegmentStored(object? sender, EventArgs e) => RunOnUiThread(() =>
+    {
+        UpdateTranslationProgress();
+        // A background/prefetch translation landing changes what the flow shows only while translations
+        // are on screen; in original mode the pane is unaffected, so skip the rebuild.
+        if (ShowingTranslation)
+        {
+            BuildContinuousText();
+        }
+    });
+
+    /// <summary>Runs view-facing updates on the thread the view-model was created on (the UI thread in the
+    /// app; inline in tests, which have no synchronization context).</summary>
+    private void RunOnUiThread(Action action)
+    {
+        if (_uiContext is null || SynchronizationContext.Current == _uiContext)
+        {
+            action();
+            return;
+        }
+
+        _uiContext.Post(_ => action(), null);
+    }
+
+    /// <summary>
+    /// Progress is measured in segments, not pages: segments are what actually get translated, and unlike
+    /// pages they do not move when the book is repaginated — so the percentage never jumps around.
+    /// </summary>
     private void UpdateTranslationProgress()
     {
-        if (_document is null || PageCount <= 0)
+        if (_document is null || _document.Segments.Count == 0)
         {
-            TranslatedPages = 0;
+            TranslatedSegments = 0;
+            TotalSegments = 0;
             TranslationProgressPercent = 0;
             return;
         }
 
-        var inMemoryCount = _cache.CountForDocument(_document.Id, _target, _model.ModelId);
-        var persistedCount = _persistedTranslations.Values.Count(t =>
-            string.Equals(t.ModelId, _model.ModelId, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(t.TargetLanguage.Code, _target.Code, StringComparison.OrdinalIgnoreCase));
-        var completed = Math.Max(inMemoryCount, persistedCount);
-        TranslatedPages = Math.Clamp(completed, 0, PageCount);
-        TranslationProgressPercent = PageCount == 0 ? 0 : (double)TranslatedPages * 100d / PageCount;
+        var total = _document.Segments.Count;
+        TotalSegments = total;
+        var done = _store.CountStored(_document.Segments.Select(s => TranslationKey.For(s, ResolvedSource, _target, _model.ModelId)));
+        TranslatedSegments = Math.Clamp(done, 0, total);
+        TranslationProgressPercent = (double)TranslatedSegments * 100d / total;
     }
 
-    private void LoadPersistedTranslations(Document document, ReaderPreferences preferences)
+    /// <summary>
+    /// One-time rescue of translations made before segments existed. They were stored per page, and a page
+    /// translation is the paragraph-by-paragraph translation of that page's text — so where the paragraph
+    /// counts line up, each pair can be recovered as a segment. Pages whose counts do not line up are
+    /// dropped rather than guessed at.
+    /// </summary>
+    private async Task MigrateLegacyPageTranslationsAsync(Document document, ReaderPreferences preferences)
     {
-        _persistedTranslations.Clear();
-        if (!preferences.TranslationCacheByDocument.TryGetValue(document.Id, out var entries))
+        if (preferences.MigratedDocuments.Contains(document.Id, StringComparer.OrdinalIgnoreCase)
+            || !preferences.TranslationCacheByDocument.TryGetValue(document.Id, out var entries)
+            || entries.Count == 0)
         {
             return;
         }
 
+        var sourceByHash = await CollectPageTextsAcrossLayoutsAsync(document).ConfigureAwait(true);
+        var recovered = new Dictionary<TranslationKey, string>();
         foreach (var entry in entries)
         {
-            if (entry.PageIndex < 0 || entry.PageIndex >= document.PageCount || string.IsNullOrWhiteSpace(entry.ModelId))
+            if (string.IsNullOrWhiteSpace(entry.TextHash)
+                || string.IsNullOrWhiteSpace(entry.ModelId)
+                || string.IsNullOrWhiteSpace(entry.Text)
+                || !sourceByHash.TryGetValue(entry.TextHash, out var originalText))
             {
-                continue;
+                continue; // made from text this book no longer contains
             }
 
             var target = new LanguageCode(entry.TargetLanguage);
-            if (target.IsUnknown)
+            var sourceSegments = Page.SplitIntoSegments(originalText);
+            var translatedSegments = Page.SplitIntoSegments(entry.Text);
+            if (target.IsUnknown || sourceSegments.Count == 0 || sourceSegments.Count != translatedSegments.Count)
+            {
+                continue; // the model merged or split paragraphs — cannot align them safely
+            }
+
+            var entrySource = string.IsNullOrWhiteSpace(entry.SourceLanguage) ? LanguageCode.Unknown : new LanguageCode(entry.SourceLanguage);
+            for (var i = 0; i < sourceSegments.Count; i++)
+            {
+                recovered[TranslationKey.For(sourceSegments[i], entrySource, target, entry.ModelId)] = translatedSegments[i];
+            }
+        }
+
+        await _store.ImportAsync(recovered).ConfigureAwait(true);
+
+        // Record that this book has been migrated, but keep the legacy entries: they are the only copy of
+        // that work, and a better alignment may yet be able to rescue more of it.
+        await UpdatePreferencesAsync(prefs => prefs.MigratedDocuments.Add(document.Id)).ConfigureAwait(true);
+        _logger.LogInformation(
+            "Recovered {Segments} segments from {Pages} page translations stored by an earlier version.",
+            recovered.Count,
+            entries.Count);
+    }
+
+    /// <summary>
+    /// Page texts a legacy translation could have been made from. Legacy translations are keyed by the hash
+    /// of a whole page, and page boundaries move with the reading surface, so the pages as laid out right
+    /// now are usually not the pages those translations were made against. Re-paginating the book across a
+    /// range of widths recovers the layouts they belong to.
+    /// </summary>
+    private async Task<Dictionary<string, string>> CollectPageTextsAcrossLayoutsAsync(Document document)
+    {
+        var byHash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        async Task CollectAsync(Document layout)
+        {
+            for (var i = 0; i < layout.PageCount; i++)
+            {
+                var page = await _reader!.GetPageAsync(layout, i, CancellationToken.None).ConfigureAwait(true);
+                byHash[TranslationKey.HashText(page.ExtractableText)] = page.ExtractableText;
+            }
+        }
+
+        await CollectAsync(document).ConfigureAwait(true);
+
+        if (_reader is not IReflowableDocumentReader reflowable)
+        {
+            return byHash; // a PDF's pages never move
+        }
+
+        for (var width = 600d; width <= 2400d; width += 60d)
+        {
+            if (!reflowable.UpdateViewport(width, 800d))
             {
                 continue;
             }
 
-            var source = string.IsNullOrWhiteSpace(entry.SourceLanguage) ? LanguageCode.Unknown : new LanguageCode(entry.SourceLanguage);
-            var key = new TranslationKey(document.Id, entry.PageIndex, target, entry.ModelId);
-            var translation = PageTranslation.Completed(entry.PageIndex, target, source, entry.ModelId, entry.Text ?? string.Empty, TranslationOrigin.OnDemand);
-            _persistedTranslations[PersistedKey(key)] = translation;
+            var layout = await _reader.OpenAsync(document.SourcePath, CancellationToken.None).ConfigureAwait(true);
+            await CollectAsync(layout).ConfigureAwait(true);
         }
-    }
 
-    private async Task PersistCompletedTranslationAsync(PageTranslation result)
-    {
-        if (_document is null)
+        // Put the reader back on the layout the reading surface actually calls for.
+        if (_viewportWidth > 0 && _viewportHeight > 0)
         {
-            return;
+            var fontScale = ReadingFontSizes.PaginationBaseline / ReadingFontSize;
+            reflowable.UpdateViewport(_viewportWidth * fontScale, _viewportHeight * fontScale * TranslationGrowthAllowance);
         }
-
-        try
+        else
         {
-            await UpdatePreferencesAsync(
-                prefs =>
-                {
-                    if (!prefs.TranslationCacheByDocument.TryGetValue(_document.Id, out var entries))
-                    {
-                        entries = new List<StoredTranslation>();
-                        prefs.TranslationCacheByDocument[_document.Id] = entries;
-                    }
-
-                    var existing = entries.FindIndex(e =>
-                        e.PageIndex == result.PageIndex
-                        && string.Equals(e.TargetLanguage, result.TargetLanguage.Code, StringComparison.OrdinalIgnoreCase)
-                        && string.Equals(e.ModelId, result.ModelId, StringComparison.OrdinalIgnoreCase));
-
-                    var stored = new StoredTranslation
-                    {
-                        PageIndex = result.PageIndex,
-                        TargetLanguage = result.TargetLanguage.Code,
-                        SourceLanguage = result.SourceLanguage.Code,
-                        ModelId = result.ModelId,
-                        Text = result.Text,
-                    };
-
-                    if (existing >= 0)
-                    {
-                        entries[existing] = stored;
-                    }
-                    else
-                    {
-                        entries.Add(stored);
-                    }
-
-                    // Keep the on-disk cache bounded per document.
-                    const int maxEntriesPerDocument = 5000;
-                    if (entries.Count > maxEntriesPerDocument)
-                    {
-                        entries.RemoveRange(0, entries.Count - maxEntriesPerDocument);
-                    }
-                }).ConfigureAwait(false);
-
-            var key = new TranslationKey(_document.Id, result.PageIndex, result.TargetLanguage, result.ModelId);
-            _persistedTranslations[PersistedKey(key)] = result;
+            reflowable.UpdateViewport(BaselineLayoutWidth, BaselineLayoutHeight);
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to persist translation cache for document {Document}.", _document.Id);
-        }
-    }
 
-    private bool TryGetPersistedTranslation(TranslationKey key, out PageTranslation translation) =>
-        _persistedTranslations.TryGetValue(PersistedKey(key), out translation!);
-
-    private static string PersistedKey(TranslationKey key) =>
-        $"{key.PageIndex}|{key.TargetLanguage.Code.ToLowerInvariant()}|{key.ModelId.ToLowerInvariant()}";
-
-    private void CacheWithoutPersisting(PageTranslation translation, TranslationKey key)
-    {
-        _suppressPersistenceFromCacheEvents = true;
-        try
-        {
-            _cache.Set(key, translation);
-        }
-        finally
-        {
-            _suppressPersistenceFromCacheEvents = false;
-        }
+        _document = await _reader.OpenAsync(document.SourcePath, CancellationToken.None).ConfigureAwait(true);
+        PageCount = _document.PageCount;
+        return byHash;
     }
 
     private async Task PersistLastReadPageAsync(int pageIndex)

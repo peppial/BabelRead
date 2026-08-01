@@ -18,7 +18,14 @@ internal static class AppServices
     {
         var services = new ServiceCollection();
 
-        services.AddLogging(b => b.AddDebug().SetMinimumLevel(LogLevel.Information));
+        // Console as well as Debug: background failures (a prefetch that dies, a persist that throws) are
+        // invisible otherwise, and they are exactly the ones that stop translation without a trace.
+        services.AddLogging(b => b
+            .AddDebug()
+            .AddConsole()
+            .SetMinimumLevel(Enum.TryParse<LogLevel>(Environment.GetEnvironmentVariable("BABELREAD_LOGLEVEL"), true, out var level)
+                ? level
+                : LogLevel.Information));
 
         // Secure credential storage — native Keychain on macOS, in-memory elsewhere until a native
         // DPAPI/libsecret backend is wired for those platforms.
@@ -40,7 +47,7 @@ internal static class AppServices
         services.AddSingleton<DocumentReaderRegistry>();
 
         // Translation pipeline.
-        services.AddSingleton<ITranslationCache>(_ => new TranslationCache());
+        services.AddSingleton<ITranslationStore, JsonTranslationStore>();
         services.AddSingleton<ITranslationService, TranslationService>();
         services.AddSingleton<IPrefetchCoordinator, PrefetchCoordinator>();
 

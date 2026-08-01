@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
+using Avalonia.VisualTree;
 using BabelRead.App.ViewModels;
 using BabelRead.App.Views;
 using BabelRead.Core.Documents;
@@ -97,12 +98,54 @@ public sealed class ReaderViewKeyboardTests : IDisposable
         Assert.Equal(ReadingFontSizes.Maximum, vm.ReadingFontSize);
     }
 
-    private async Task<(Window Window, ReaderViewModel ViewModel)> OpenReaderAsync(params string[] pages)
+    [AvaloniaFact]
+    public async Task An_overflowing_page_can_be_scrolled_all_the_way_to_its_last_line()
     {
+        // A page far taller than a short window: the bottom must be reachable, not stuck under an inset.
+        var lines = Enumerable.Range(0, 50)
+            .Select(i => ($"Line {i} with several words that make the page tall enough to overflow.", 60.0, 800.0 - (i * 15)));
+        var path = SampleDocuments.CreatePdfWithLines(Path.Combine(_dir, "tall.pdf"), lines);
+
+        var store = new InMemoryTranslationStore();
         var vm = new ReaderViewModel(
             new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
-            new TranslationService(new StubChatClientFactory(new FakeChatClient())),
-            new TranslationCache(),
+            new TranslationService(new StubChatClientFactory(new FakeChatClient()), store),
+            store,
+            new NoOpPrefetchCoordinator(),
+            new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
+
+        var window = new Window { Content = new ReaderView { DataContext = vm }, Width = 500, Height = 300 };
+        window.Show();
+        await vm.OpenAsync(path);
+
+        var view = (ReaderView)window.Content!;
+        var scroll = view.FindControl<ScrollViewer>("ReadingScroll")!;
+        var text = view.FindControl<SelectableTextBlock>("PageText")!;
+        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+
+        Assert.Equal(default, scroll.Padding); // the inset lives on the text margin, not here
+
+        // The extent must include the whole text plus its full 24px top+bottom inset. The bug left the
+        // bottom inset out of the extent, stranding the last line under it.
+        Assert.True(
+            scroll.Extent.Height >= text.Bounds.Height + 48,
+            $"extent {scroll.Extent.Height} must cover the text {text.Bounds.Height} and its 48px inset");
+
+        // And the ScrollViewer lets you scroll to that true bottom, not a short one.
+        scroll.Offset = scroll.Offset.WithY(scroll.Extent.Height);
+        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+        Assert.True(
+            Math.Abs(scroll.Offset.Y - (scroll.Extent.Height - scroll.Viewport.Height)) < 1,
+            "must scroll to the full bottom of the content");
+    }
+
+    private async Task<(Window Window, ReaderViewModel ViewModel)> OpenReaderAsync(params string[] pages)
+    {
+        var store = new InMemoryTranslationStore();
+        var vm = new ReaderViewModel(
+            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
+            new TranslationService(new StubChatClientFactory(new FakeChatClient()), store),
+            store,
             new NoOpPrefetchCoordinator(),
             new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
 

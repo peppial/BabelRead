@@ -4,49 +4,151 @@
              xmlns:controls="clr-namespace:BabelRead.App.Controls"
              x:Class="BabelRead.App.Views.ReaderView"
              x:DataType="vm:ReaderViewModel">
-  <DockPanel>
-    <!-- Toolbar -->
-    <Border DockPanel.Dock="Top" Padding="12,8" Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
-      <Grid ColumnDefinitions="Auto,*,Auto">
-        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-          <Button Name="OpenButton" Content="Open…"
-                  AutomationProperties.Name="Open a PDF or EPUB" />
-          <TextBlock Text="{Binding Title}" VerticalAlignment="Center"
-                     FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="360" />
-          <TextBlock Text="{Binding TranslationPercentLabel}" VerticalAlignment="Center" Opacity="0.8"
-                     AutomationProperties.Name="Translation percent" />
-        </StackPanel>
+  <UserControl.Resources>
+    <!-- Material "translate" glyph (24×24 viewport), drawn as vector geometry so it renders on any
+         platform without depending on a font that happens to carry a translate character. -->
+    <StreamGeometry x:Key="TranslateIcon">M12.87 15.07l-2.54-2.51.03-.03c1.74-1.94 2.98-4.17 3.71-6.53H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z</StreamGeometry>
+  </UserControl.Resources>
 
-        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-          <Button Content="◀" Command="{Binding PreviousPageCommand}" IsEnabled="{Binding CanGoPrevious}"
-                  AutomationProperties.Name="Previous page" />
-          <TextBlock VerticalAlignment="Center" MinWidth="80" TextAlignment="Center"
-                     Text="{Binding CurrentPageLabel}" />
-          <Button Content="▶" Command="{Binding NextPageCommand}" IsEnabled="{Binding CanGoNext}"
-                  AutomationProperties.Name="Next page" />
-          <Button Content="{Binding ToggleLabel}" Command="{Binding ToggleViewCommand}"
-                  AutomationProperties.Name="Toggle between original and translation" />
-          <Button Name="SettingsButton" Content="⚙"
-                  AutomationProperties.Name="Settings" />
-        </StackPanel>
-      </Grid>
-    </Border>
+  <UserControl.Styles>
+    <!-- Flat, borderless toolbar buttons with a soft hover highlight (Apple Books feel). -->
+    <Style Selector="Button.tool">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="10,6" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.nav">
+      <Setter Property="FontSize" Value="20" />
+      <Setter Property="Padding" Value="10,2" />
+    </Style>
+  </UserControl.Styles>
 
-    <!-- Reading surface -->
-    <Panel Margin="0">
-      <ScrollViewer Name="ReadingScroll" IsVisible="{Binding IsContentVisible}" Padding="32,24">
+  <Panel>
+    <!-- Reading surface fills the whole area; the toolbar floats over the top of it. -->
+    <ScrollViewer Name="ReadingScroll" IsVisible="{Binding IsContentVisible}"
+                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                  AllowAutoHide="False">
+      <!-- Host that is always at least a screenful tall, so a short page (a chapter's last page) is
+           centred in the window like a printed book instead of clinging to the top. A full page grows the
+           host past the viewport and scrolls from the top as usual. -->
+      <Panel MinHeight="{Binding #ReadingScroll.Bounds.Height}">
+        <!-- Centered, justified column with a comfortable measure. The inset is a margin on the text (not
+             ScrollViewer padding, which is left out of the scroll extent and would hide the last line). The
+             top inset clears the floating toolbar. -->
         <SelectableTextBlock Name="PageText" Text="{Binding DisplayText}"
                              FlowDirection="{Binding ReadingFlowDirection}"
                              AutomationProperties.Name="Page text"
-                             TextWrapping="Wrap"
-                             FontSize="{Binding ReadingFontSize}" LineHeight="{Binding ReadingLineHeight}"
-                             HorizontalAlignment="Stretch" />
-      </ScrollViewer>
+                             TextWrapping="Wrap" TextAlignment="Justify"
+                             Margin="24,72,24,56" MaxWidth="720"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                             FontSize="{Binding ReadingFontSize}" LineHeight="{Binding ReadingLineHeight}" />
+      </Panel>
+    </ScrollViewer>
 
-      <controls:StatePanel IsVisible="{Binding IsStatusVisible}"
-                           Message="{Binding StatusMessage}"
-                           ShowRetry="{Binding ShowRetry}"
-                           RetryCommand="{Binding RetryCommand}" />
-    </Panel>
-  </DockPanel>
+    <controls:StatePanel IsVisible="{Binding IsStatusVisible}"
+                         Message="{Binding StatusMessage}"
+                         ShowRetry="{Binding ShowRetry}"
+                         RetryCommand="{Binding RetryCommand}" />
+
+    <Border IsVisible="{Binding IsTranslatingFallbackVisible}"
+            HorizontalAlignment="Center" VerticalAlignment="Top"
+            Margin="0,84,0,0" Padding="12,5"
+            Background="{DynamicResource SystemControlBackgroundAltHighBrush}"
+            CornerRadius="12" BoxShadow="0 2 10 0 #22000000">
+      <TextBlock Text="Translating…" Opacity="0.75" FontWeight="SemiBold" />
+    </Border>
+
+    <!-- Floating toolbar. Fades away while reading; the code-behind shows it on pointer movement. -->
+    <Border Name="Toolbar" VerticalAlignment="Top" Margin="12,12,12,0"
+            Background="{DynamicResource SystemControlBackgroundAltHighBrush}"
+            CornerRadius="14" Padding="8,6" BoxShadow="0 4 18 0 #28000000">
+      <Border.Transitions>
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.22" />
+        </Transitions>
+      </Border.Transitions>
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <Button Grid.Column="0" Name="OpenButton" Classes="tool" Content="Open…"
+                AutomationProperties.Name="Open a PDF or EPUB" />
+
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1" Margin="12,0">
+          <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="14"
+                     HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="420"
+                     AutomationProperties.Name="Document title" />
+          <TextBlock HorizontalAlignment="Center" Opacity="0.65" FontSize="11.5"
+                     AutomationProperties.Name="Reading position">
+            <Run Text="{Binding CurrentPageLabel}" />
+            <Run Text="   ·   " />
+            <Run Text="{Binding TranslationPercentLabel}" />
+          </TextBlock>
+        </StackPanel>
+
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+          <Button Classes="tool nav" Content="‹" Command="{Binding PreviousPageCommand}"
+                  IsEnabled="{Binding CanGoPrevious}" AutomationProperties.Name="Previous page" />
+          <Button Classes="tool nav" Content="›" Command="{Binding NextPageCommand}"
+                  IsEnabled="{Binding CanGoNext}" AutomationProperties.Name="Next page" />
+
+          <!-- Original / translation toggle. The translate icon is solid while the translation is shown
+               and dimmed while the original is shown; the tooltip spells out the action. -->
+          <Button Classes="tool" Command="{Binding ToggleViewCommand}" Padding="8,6"
+                  ToolTip.Tip="{Binding ToggleLabel}" AutomationProperties.Name="{Binding ToggleLabel}">
+            <Viewbox Width="19" Height="19">
+              <Panel Width="24" Height="24">
+                <Path Data="{StaticResource TranslateIcon}"
+                      Fill="{DynamicResource SystemControlForegroundBaseHighBrush}"
+                      IsVisible="{Binding ShowingTranslation}" />
+                <Path Data="{StaticResource TranslateIcon}"
+                      Fill="{DynamicResource SystemControlForegroundBaseHighBrush}" Opacity="0.35"
+                      IsVisible="{Binding !ShowingTranslation}" />
+              </Panel>
+            </Viewbox>
+          </Button>
+
+          <Button Name="TypographyButton" Classes="tool" AutomationProperties.Name="Text and reading options">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Bottom" Spacing="1">
+              <TextBlock Text="A" FontSize="12" VerticalAlignment="Bottom" />
+              <TextBlock Text="A" FontSize="18" VerticalAlignment="Bottom" FontWeight="SemiBold" />
+            </StackPanel>
+            <Button.Flyout>
+              <Flyout Placement="Bottom">
+                <StackPanel Width="260" Spacing="10" Margin="4">
+                  <TextBlock Text="Text size" FontWeight="SemiBold" />
+                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="18">
+                    <Button Content="A" FontSize="13" Width="44" HorizontalContentAlignment="Center"
+                            Command="{Binding DecreaseFontSizeCommand}" AutomationProperties.Name="Smaller text" />
+                    <TextBlock Text="{Binding ReadingFontSize}" VerticalAlignment="Center"
+                               MinWidth="28" TextAlignment="Center" Opacity="0.7" />
+                    <Button Content="A" FontSize="21" Width="44" HorizontalContentAlignment="Center"
+                            Command="{Binding IncreaseFontSizeCommand}" AutomationProperties.Name="Larger text" />
+                  </StackPanel>
+
+                  <Separator />
+
+                  <TextBlock Text="Background translation" FontWeight="SemiBold" />
+                  <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Stretch">
+                    <Button Content="Off" HorizontalAlignment="Stretch" Width="76"
+                            Command="{Binding SetBackgroundModeCommand}" CommandParameter="Off" />
+                    <Button Content="Gentle" HorizontalAlignment="Stretch" Width="76"
+                            Command="{Binding SetBackgroundModeCommand}" CommandParameter="Gentle" />
+                    <Button Content="Full" HorizontalAlignment="Stretch" Width="76"
+                            Command="{Binding SetBackgroundModeCommand}" CommandParameter="FullSpeed" />
+                  </StackPanel>
+                  <TextBlock Opacity="0.6" FontSize="12">
+                    <Run Text="Now: " />
+                    <Run Text="{Binding BackgroundTranslation}" />
+                  </TextBlock>
+                </StackPanel>
+              </Flyout>
+            </Button.Flyout>
+          </Button>
+
+          <Button Name="SettingsButton" Classes="tool" Content="⚙" AutomationProperties.Name="Settings" />
+        </StackPanel>
+      </Grid>
+    </Border>
+  </Panel>
 </UserControl>

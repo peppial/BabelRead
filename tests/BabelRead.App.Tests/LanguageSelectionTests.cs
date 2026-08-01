@@ -17,7 +17,8 @@ public sealed class LanguageSelectionTests : IDisposable
     {
         prefs = new JsonPreferencesStore(Path.Combine(_dir, "prefs.json"));
         var registry = new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() });
-        return new ReaderViewModel(registry, new TranslationService(new StubChatClientFactory(_fake)), new TranslationCache(), new NoOpPrefetchCoordinator(), prefs);
+        var store = new InMemoryTranslationStore();
+        return new ReaderViewModel(registry, new TranslationService(new StubChatClientFactory(_fake), store), store, new NoOpPrefetchCoordinator(), prefs);
     }
 
     [Fact]

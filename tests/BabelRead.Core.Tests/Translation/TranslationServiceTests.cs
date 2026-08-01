@@ -16,7 +16,7 @@ public class TranslationServiceTests
     public async Task Successful_translation_is_completed_and_matches_the_source_page()
     {
         var fake = new FakeChatClient();
-        var service = new TranslationService(new StubChatClientFactory(fake));
+        var service = new TranslationService(new StubChatClientFactory(fake), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(), new Page(7, "Bonjour"), new LanguageCode("en"), null, Model, TranslationOrigin.OnDemand, CancellationToken.None);
@@ -31,7 +31,7 @@ public class TranslationServiceTests
     public async Task Source_equal_target_short_circuits_without_calling_the_model()
     {
         var fake = new FakeChatClient();
-        var service = new TranslationService(new StubChatClientFactory(fake));
+        var service = new TranslationService(new StubChatClientFactory(fake), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(sourceLang: "en"), new Page(1, "Hello"), new LanguageCode("en"), null, Model, TranslationOrigin.OnDemand, CancellationToken.None);
@@ -45,7 +45,7 @@ public class TranslationServiceTests
     public async Task Empty_page_returns_failed_nothing_to_translate()
     {
         var fake = new FakeChatClient();
-        var service = new TranslationService(new StubChatClientFactory(fake));
+        var service = new TranslationService(new StubChatClientFactory(fake), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(), new Page(2, "   "), new LanguageCode("en"), null, Model, TranslationOrigin.OnDemand, CancellationToken.None);
@@ -59,7 +59,7 @@ public class TranslationServiceTests
     public async Task Model_error_returns_failed_with_actionable_reason()
     {
         var fake = new FakeChatClient(throwOnCall: new HttpRequestException("boom"));
-        var service = new TranslationService(new StubChatClientFactory(fake));
+        var service = new TranslationService(new StubChatClientFactory(fake), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(), new Page(4, "Bonjour"), new LanguageCode("en"), null, Model, TranslationOrigin.OnDemand, CancellationToken.None);
@@ -72,7 +72,7 @@ public class TranslationServiceTests
     public async Task Unrequested_operation_cancellation_returns_failed_timeout_instead_of_throwing()
     {
         var fake = new FakeChatClient(throwOnCall: new OperationCanceledException("provider timed out"));
-        var service = new TranslationService(new StubChatClientFactory(fake));
+        var service = new TranslationService(new StubChatClientFactory(fake), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(), new Page(5, "Bonjour"), new LanguageCode("en"), null, Model, TranslationOrigin.OnDemand, CancellationToken.None);
@@ -85,7 +85,7 @@ public class TranslationServiceTests
     public async Task Missing_model_error_returns_actionable_model_specific_reason()
     {
         var fake = new FakeChatClient(throwOnCall: new InvalidOperationException("HTTP 404 (not_found_error) model 'llama3.1' not found"));
-        var service = new TranslationService(new StubChatClientFactory(fake));
+        var service = new TranslationService(new StubChatClientFactory(fake), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(), new Page(6, "Bonjour"), new LanguageCode("en"), null, Model, TranslationOrigin.OnDemand, CancellationToken.None);
@@ -100,7 +100,7 @@ public class TranslationServiceTests
         var service = new TranslationService(new StubChatClientFactory(profile =>
             profile.ModelId == "llama3.1"
                 ? new FakeChatClient(throwOnCall: new InvalidOperationException("HTTP 404 (not_found_error) model 'llama3.1' not found"))
-                : new FakeChatClient()));
+                : new FakeChatClient()), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(), new Page(8, "Bonjour"), new LanguageCode("en"), null, new ModelProfile("p2", "Local", ModelKind.Local, "llama3.1"), TranslationOrigin.OnDemand, CancellationToken.None);
@@ -119,7 +119,7 @@ public class TranslationServiceTests
                 "llama3.1:latest" => new FakeChatClient(throwOnCall: new InvalidOperationException("HTTP 404 (not_found_error) model 'llama3.1:latest' not found")),
                 "llama3.1:8b" => new FakeChatClient(),
                 _ => new FakeChatClient(throwOnCall: new InvalidOperationException("unexpected model id"))
-            }));
+            }), new InMemoryTranslationStore());
 
         var result = await service.TranslateAsync(
             Doc(), new Page(9, "Bonjour"), new LanguageCode("en"), null, new ModelProfile("p2", "Local", ModelKind.Local, "llama3.1"), TranslationOrigin.OnDemand, CancellationToken.None);
@@ -132,7 +132,7 @@ public class TranslationServiceTests
     public async Task Source_override_takes_precedence_over_detected_language()
     {
         var fake = new FakeChatClient();
-        var service = new TranslationService(new StubChatClientFactory(fake));
+        var service = new TranslationService(new StubChatClientFactory(fake), new InMemoryTranslationStore());
 
         // Detected source is English, but override says German → not a source==target short-circuit for target en.
         var result = await service.TranslateAsync(

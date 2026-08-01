@@ -19,7 +19,8 @@ public sealed class SettingsViewModelTests : IDisposable
         var secrets = new InMemorySecretStore();
         var profiles = new ModelProfileService(prefs, secrets, new StubOllamaModelCatalog());
         var registry = new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() });
-        var reader = new ReaderViewModel(registry, new TranslationService(new StubChatClientFactory(new FakeChatClient())), new TranslationCache(), new NoOpPrefetchCoordinator(), prefs);
+        var store = new InMemoryTranslationStore();
+        var reader = new ReaderViewModel(registry, new TranslationService(new StubChatClientFactory(new FakeChatClient()), store), store, new NoOpPrefetchCoordinator(), prefs);
         return (new SettingsViewModel(profiles, reader), reader);
     }
 

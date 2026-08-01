@@ -27,6 +27,32 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public ObservableCollection<ModelProfile> Profiles { get; } = new();
 
+    /// <summary>Background-translation modes, as the Settings window shows them.</summary>
+    public static IReadOnlyList<string> BackgroundTranslationOptions { get; } = new[]
+    {
+        "Off — only a couple of pages ahead",
+        "Gentle — pause between pages (cooler)",
+        "Full speed — no pauses (hotter, ~2x faster)",
+    };
+
+    /// <summary>The reader's current mode, as one of <see cref="BackgroundTranslationOptions"/>. Setting it
+    /// applies and persists the mode.</summary>
+    public string BackgroundTranslationLabel
+    {
+        get => BackgroundTranslationOptions[(int)_reader.BackgroundTranslation];
+        set
+        {
+            var index = BackgroundTranslationOptions.ToList().IndexOf(value);
+            if (index < 0 || (BackgroundTranslation)index == _reader.BackgroundTranslation)
+            {
+                return;
+            }
+
+            _ = _reader.SetBackgroundTranslationAsync((BackgroundTranslation)index);
+            OnPropertyChanged();
+        }
+    }
+
     /// <summary>Only local models run without any account or key; cloud models need reader-supplied
     /// credentials. Consumer chat subscriptions (Copilot, claude.ai) are intentionally not an option.</summary>
     public static IReadOnlyList<string> AvailableKindLabels { get; } = new[] { "Local (no key)", "Cloud (your API key)" };

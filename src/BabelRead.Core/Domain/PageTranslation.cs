@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace BabelRead.Core.Domain;
 
 /// <summary>Where a translation came from (FR-008 / FR-015).</summary>
@@ -15,9 +18,22 @@ public enum TranslationStatus
     Failed,
 }
 
-/// <summary>Cache key for a produced translation. Includes language and model so switching either
-/// never serves a stale entry (FR-007 / FR-008).</summary>
-public readonly record struct TranslationKey(string DocumentId, int PageIndex, LanguageCode TargetLanguage, string ModelId);
+/// <summary>
+/// Identity of a translated segment. It is content-addressed: the source text's hash, plus every input
+/// that changes what the model produces — the source and target languages and the model itself, so
+/// switching any of them never serves a stale entry (FR-007 / FR-008). Deliberately carries no page index
+/// and no document id, so translated work survives repagination, a renamed file, and the same paragraph
+/// appearing in another book.
+/// </summary>
+public readonly record struct TranslationKey(string TextHash, LanguageCode SourceLanguage, LanguageCode TargetLanguage, string ModelId)
+{
+    public static TranslationKey For(string segmentText, LanguageCode source, LanguageCode target, string modelId) =>
+        new(HashText(segmentText), source, target, modelId);
+
+    /// <summary>Short, stable fingerprint of a segment's source text.</summary>
+    public static string HashText(string? text) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text ?? string.Empty)))[..16].ToLowerInvariant();
+}
 
 /// <summary>AI-generated target-language text for one specific page (spec entity: Translation).</summary>
 public sealed class PageTranslation

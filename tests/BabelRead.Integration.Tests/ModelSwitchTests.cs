@@ -14,7 +14,7 @@ public class ModelSwitchTests
         var modelA = new FakeChatClient(s => "A:" + s);
         var modelB = new FakeChatClient(s => "B:" + s);
         var factory = new StubChatClientFactory(profile => profile.ModelId == "model-a" ? modelA : modelB);
-        var service = new TranslationService(factory);
+        var service = new TranslationService(factory, new InMemoryTranslationStore());
 
         var doc = new Document("d", "Doc", "/tmp/d.pdf", DocumentFormat.Pdf, 1, new LanguageCode("fr"));
         var page = new Page(0, "Bonjour");

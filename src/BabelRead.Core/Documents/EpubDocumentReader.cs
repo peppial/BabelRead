@@ -13,17 +13,29 @@ namespace BabelRead.Core.Documents;
 /// </summary>
 public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDocumentReader, IDisposable
 {
-    private const int DefaultCharsPerVirtualPage = 1800;
     private const int MinWordBreakSearchWindow = 350;
-    private const double BaselineViewportArea = 1280d * 800d;
-    private const int MinCharsPerVirtualPage = 900;
-    private const int MaxCharsPerVirtualPage = 5000;
+
+    /// <summary>
+    /// Longest segment we will hand the model, used to break up a runaway paragraph. It is a constant on
+    /// purpose: segments must not depend on the page size, or repaginating would change them and orphan
+    /// every translation made from them.
+    /// </summary>
+    private const int MaxSegmentChars = 1200;
+
+    /// <summary>
+    /// Runs of blocks shorter than this are merged into one segment (up to <see cref="MaxSegmentChars"/>).
+    /// A segment is one translation call, so a table of contents or index — hundreds of one-line entries —
+    /// would otherwise become hundreds of separate (and, on a paid model, costly) calls for a single page.
+    /// Normal prose paragraphs already clear this bar, so they are left exactly as they are.
+    /// </summary>
+    private const int MinSegmentChars = 400;
 
     private readonly object _gate = new();
     private EpubBook? _open;
     private string? _openId;
-    private IReadOnlyList<string> _pages = [];
-    private int _charsPerVirtualPage = DefaultCharsPerVirtualPage;
+    private IReadOnlyList<IReadOnlyList<string>> _chapters = [];
+    private IReadOnlyList<IReadOnlyList<string>> _pages = [];
+    private int _charsPerVirtualPage = SegmentPaginator.DefaultCharsPerPage;
 
     public DocumentFormat Format => DocumentFormat.Epub;
 
@@ -37,17 +49,27 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
         {
             var book = await EpubReader.ReadBookAsync(path).ConfigureAwait(false);
             var id = DocumentIdentity.FromPath(path);
-            var pages = BuildPages(book, _charsPerVirtualPage);
+            var chapters = BuildChapterSegments(book);
+            var pages = SegmentPaginator.Paginate(chapters, _charsPerVirtualPage);
             lock (_gate)
             {
                 _open = book;
                 _openId = id;
+                _chapters = chapters;
                 _pages = pages;
             }
 
             var language = book.Schema.Package.Metadata.Languages.FirstOrDefault()?.Language ?? string.Empty;
-            var title = string.IsNullOrWhiteSpace(book.Title) ? Path.GetFileNameWithoutExtension(path) : book.Title;
-            return new Document(id, title, path, DocumentFormat.Epub, pages.Count, new LanguageCode(language));
+            var cleanedTitle = DocumentTitle.Clean(book.Title);
+            var title = cleanedTitle.Length > 0 ? cleanedTitle : Path.GetFileNameWithoutExtension(path);
+            return new Document(
+                id,
+                title,
+                path,
+                DocumentFormat.Epub,
+                pages.Count,
+                new LanguageCode(language),
+                chapters.SelectMany(c => c).ToArray());
         }
         catch (DocumentOpenException)
         {
@@ -83,6 +105,7 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
         lock (_gate)
         {
             _open = null;
+            _chapters = [];
             _pages = [];
         }
     }
@@ -94,7 +117,7 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
             return false;
         }
 
-        var suggested = CalculateCharsPerPage(viewportWidth, viewportHeight);
+        var suggested = SegmentPaginator.CharsPerPage(viewportWidth, viewportHeight);
         lock (_gate)
         {
             if (suggested == _charsPerVirtualPage)
@@ -105,81 +128,87 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
             _charsPerVirtualPage = suggested;
             if (_open is not null)
             {
-                _pages = BuildPages(_open, _charsPerVirtualPage);
+                _pages = SegmentPaginator.Paginate(_chapters, _charsPerVirtualPage); // regroups segments; never changes them
             }
 
             return true;
         }
     }
 
-    private static IReadOnlyList<string> BuildPages(EpubBook book, int charsPerPage)
+    /// <summary>The book's segments in reading order. Independent of page size — this is what makes
+    /// translations survive a repagination.</summary>
+    private static IReadOnlyList<IReadOnlyList<string>> BuildChapterSegments(EpubBook book)
     {
-        var pages = new List<string>(book.ReadingOrder.Count);
+        var chapters = new List<IReadOnlyList<string>>(book.ReadingOrder.Count);
         foreach (var chapter in book.ReadingOrder)
         {
-            var text = HtmlToText(chapter.Content);
-            var chunks = ChunkText(text, charsPerPage);
-            if (chunks.Count == 0)
-            {
-                pages.Add(string.Empty);
-                continue;
-            }
-
-            pages.AddRange(chunks);
+            chapters.Add(SplitIntoSegments(HtmlToText(chapter.Content)));
         }
 
-        return pages;
+        return chapters;
     }
 
-    private static IReadOnlyList<string> ChunkText(string text, int charsPerPage)
+    private static IReadOnlyList<string> SplitIntoSegments(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
             return [];
         }
 
-        var chunks = new List<string>();
-        var current = new StringBuilder(charsPerPage + 64);
-        var blocks = text.Split("\n\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var blocks = new List<string>();
+        foreach (var block in text.Split("\n\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            blocks.AddRange(SplitLargeBlock(block));
+        }
+
+        return CoalesceShortBlocks(blocks);
+    }
+
+    /// <summary>
+    /// Merges consecutive short blocks (kept apart by their paragraph breaks) into one segment, so a list
+    /// or table of contents is a handful of translation calls rather than one per line. A block that already
+    /// meets <see cref="MinSegmentChars"/> is emitted on its own, so ordinary paragraphs are never merged;
+    /// merging never pushes a segment past <see cref="MaxSegmentChars"/>.
+    /// </summary>
+    private static List<string> CoalesceShortBlocks(IReadOnlyList<string> blocks)
+    {
+        var result = new List<string>();
+        var buffer = new StringBuilder();
         foreach (var block in blocks)
         {
-            foreach (var part in SplitLargeBlock(block, charsPerPage))
+            if (buffer.Length == 0)
             {
-                if (current.Length == 0)
-                {
-                    current.Append(part);
-                    continue;
-                }
-
-                if (current.Length + 2 + part.Length <= charsPerPage)
-                {
-                    current.Append("\n\n").Append(part);
-                    continue;
-                }
-
-                chunks.Add(current.ToString());
-                current.Clear();
-                current.Append(part);
+                buffer.Append(block);
+            }
+            else if (buffer.Length < MinSegmentChars && buffer.Length + 2 + block.Length <= MaxSegmentChars)
+            {
+                buffer.Append("\n\n").Append(block); // preserve the paragraph break inside the merged segment
+            }
+            else
+            {
+                result.Add(buffer.ToString());
+                buffer.Clear();
+                buffer.Append(block);
             }
         }
 
-        if (current.Length > 0)
+        if (buffer.Length > 0)
         {
-            chunks.Add(current.ToString());
+            result.Add(buffer.ToString());
         }
 
-        return chunks;
+        return result;
     }
 
-    private static IEnumerable<string> SplitLargeBlock(string block, int charsPerPage)
+    private static IEnumerable<string> SplitLargeBlock(string block)
     {
         var remaining = block.Trim();
-        while (remaining.Length > charsPerPage)
+        while (remaining.Length > MaxSegmentChars)
         {
-            var splitAt = remaining.LastIndexOf(' ', charsPerPage);
+            var splitAt = remaining.LastIndexOf(' ', MaxSegmentChars);
             if (splitAt < MinWordBreakSearchWindow)
             {
-                splitAt = charsPerPage;
+                splitAt = MaxSegmentChars;
             }
 
             yield return remaining[..splitAt].TrimEnd();
@@ -190,13 +219,6 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
         {
             yield return remaining;
         }
-    }
-
-    private static int CalculateCharsPerPage(double viewportWidth, double viewportHeight)
-    {
-        var areaFactor = (viewportWidth * viewportHeight) / BaselineViewportArea;
-        var chars = (int)Math.Round(DefaultCharsPerVirtualPage * areaFactor, MidpointRounding.AwayFromZero);
-        return Math.Clamp(chars, MinCharsPerVirtualPage, MaxCharsPerVirtualPage);
     }
 
     internal static string HtmlToText(string? html)

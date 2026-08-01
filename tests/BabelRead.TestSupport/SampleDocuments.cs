@@ -10,8 +10,13 @@ namespace BabelRead.TestSupport;
 /// committed binary files.</summary>
 public static class SampleDocuments
 {
-    /// <summary>Writes a PDF with one page per entry in <paramref name="pageTexts"/>; an empty/whitespace
-    /// entry produces a text-less page (to exercise the image-only edge case).</summary>
+    /// <summary>
+    /// Writes a PDF with one <em>reader</em> page per entry in <paramref name="pageTexts"/>; an
+    /// empty/whitespace entry produces a text-less page (to exercise the image-only edge case).
+    /// The reader paginates by content rather than by physical PDF page, so each entry is padded past the
+    /// largest page budget the paginator can pick — that keeps one entry = one reader page whatever the
+    /// viewport, which is the contract navigation tests rely on.
+    /// </summary>
     public static string CreatePdf(string path, params string[] pageTexts)
     {
         var builder = new PdfDocumentBuilder();
@@ -21,8 +26,39 @@ public static class SampleDocuments
             var page = builder.AddPage(595, 842); // A4 in points
             if (!string.IsNullOrWhiteSpace(text))
             {
-                page.AddText(text, 12, new PdfPoint(50, 780), font);
+                page.AddText(PadToOwnReaderPage(text), 12, new PdfPoint(50, 780), font);
             }
+        }
+
+        File.WriteAllBytes(path, builder.Build());
+        return path;
+    }
+
+    /// <summary>Comfortably above the paginator's maximum page budget, so the entry never shares a page.</summary>
+    private const int OwnReaderPageChars = 5200;
+
+    private static string PadToOwnReaderPage(string text)
+    {
+        // Neutral filler: it must not contain any word a test asserts on ("one", "two", "page", ...).
+        var padded = new StringBuilder(text.Trim());
+        while (padded.Length < OwnReaderPageChars)
+        {
+            padded.Append(" Filler sentence that keeps this entry by itself.");
+        }
+
+        return padded.ToString();
+    }
+
+    /// <summary>Writes a single-page PDF placing each line at an explicit (left, baseline) point, so tests
+    /// can reproduce paragraph layouts — first-line indents, blank-line gaps — for the paragraph extractor.</summary>
+    public static string CreatePdfWithLines(string path, IEnumerable<(string Text, double Left, double Baseline)> lines)
+    {
+        var builder = new PdfDocumentBuilder();
+        var font = builder.AddStandard14Font(Standard14Font.Helvetica);
+        var page = builder.AddPage(595, 842);
+        foreach (var (text, left, baseline) in lines)
+        {
+            page.AddText(text, 12, new PdfPoint(left, baseline), font);
         }
 
         File.WriteAllBytes(path, builder.Build());

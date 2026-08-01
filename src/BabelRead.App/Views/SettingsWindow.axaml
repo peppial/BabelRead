@@ -1,7 +1,8 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="BabelRead.App.Views.SettingsWindow"
-        Title="BabelRead — Settings" Width="620" Height="560"
+        Title="BabelRead — Settings" Width="620" Height="800"
+        MinWidth="480" MinHeight="360"
         WindowStartupLocation="CenterOwner">
   <ContentControl Name="SettingsContent" />
 </Window>

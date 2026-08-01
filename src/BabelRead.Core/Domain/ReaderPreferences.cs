@@ -7,6 +7,33 @@ public enum PaneView
     Translation,
 }
 
+/// <summary>
+/// How hard the background translator is allowed to work. A local model pinned at full GPU load for hours
+/// makes a laptop hot and loud, so this is the reader's dial between finishing sooner and staying cool.
+/// </summary>
+public enum BackgroundTranslation
+{
+    /// <summary>Minimal: translate only the next couple of pages so turns stay instant, nothing further.</summary>
+    Off,
+
+    /// <summary>Pauses between pages so the GPU gets idle gaps. Roughly halves the heat, roughly doubles
+    /// the time to translate a whole book.</summary>
+    Gentle,
+
+    /// <summary>No pauses — finishes as fast as the model can go, and keeps the GPU busy throughout.</summary>
+    FullSpeed,
+}
+
+/// <summary>Pause between pages for each background-translation mode.</summary>
+public static class BackgroundTranslationPace
+{
+    public static TimeSpan InterPageDelay(BackgroundTranslation mode) => mode switch
+    {
+        BackgroundTranslation.Gentle => TimeSpan.FromSeconds(10),
+        _ => TimeSpan.Zero,
+    };
+}
+
 /// <summary>Persisted reader settings (JSON; secrets excluded) — spec entity: Reader Preferences.</summary>
 public sealed class ReaderPreferences
 {
@@ -37,6 +64,13 @@ public sealed class ReaderPreferences
 
     /// <summary>Reading-pane font size in device-independent pixels (Ctrl+/Ctrl- zoom).</summary>
     public double ReadingFontSize { get; set; } = ReadingFontSizes.Default;
+
+    /// <summary>How hard the background translator may work (heat vs. time to finish).</summary>
+    public BackgroundTranslation BackgroundTranslation { get; set; } = BackgroundTranslation.Gentle;
+
+    /// <summary>Documents whose legacy page-keyed translations have been imported into the segment store.
+    /// The legacy entries themselves are kept: a migration that deletes its own input cannot be retried.</summary>
+    public List<string> MigratedDocuments { get; init; } = [];
 }
 
 /// <summary>Bounds for the reading-pane font zoom.</summary>
@@ -78,6 +112,10 @@ public sealed class StoredModelProfile
 public sealed class StoredTranslation
 {
     public int PageIndex { get; set; }
+
+    /// <summary>Fingerprint of the page text this was translated from; entries whose hash no longer
+    /// matches the page (the document repaginated) are ignored rather than shown against other text.</summary>
+    public string TextHash { get; set; } = string.Empty;
 
     public string TargetLanguage { get; set; } = string.Empty;
 

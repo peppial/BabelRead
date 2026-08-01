@@ -27,6 +27,9 @@ public sealed record PrefetchContext(
 /// </summary>
 public interface IPrefetchCoordinator
 {
+    /// <summary>How hard background translation may work. Off cancels any work in flight.</summary>
+    BackgroundTranslation Mode { get; set; }
+
     /// <summary>Schedule background pretranslation starting from the adjacent page in <paramref name="direction"/>.</summary>
     void OnPageSettled(PrefetchContext context, int currentIndex, ReadingDirection direction);
 

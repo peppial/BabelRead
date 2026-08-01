@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using BabelRead.App.ViewModels;
 using BabelRead.App.Views;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace BabelRead.App;
 
@@ -16,7 +17,7 @@ internal static class AppHost
         var settings = services.GetRequiredService<SettingsViewModel>();
 
         // Load persisted preferences and model profiles before showing content (FR-012, T038).
-        _ = InitializeAsync(reader, settings);
+        _ = InitializeAsync(reader, settings, services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(AppHost)));
 
         var window = new MainWindow();
         var readerView = new ReaderView { DataContext = reader };
@@ -30,9 +31,22 @@ internal static class AppHost
         return window;
     }
 
-    private static async Task InitializeAsync(ReaderViewModel reader, SettingsViewModel settings)
+    /// <summary>
+    /// Startup restore. It must stay on the UI thread — it drives view-model properties the views are
+    /// bound to — so no ConfigureAwait(false) here. The task is fire-and-forget (the window has to come
+    /// up first), which is exactly why it has to log its own failures: nobody else will observe them.
+    /// </summary>
+    private static async Task InitializeAsync(ReaderViewModel reader, SettingsViewModel settings, ILogger logger)
     {
-        await settings.LoadAsync().ConfigureAwait(false); // sets the active model first
-        await reader.InitializeAsync().ConfigureAwait(false); // then restores prefs + last opened document
+        try
+        {
+            await settings.LoadAsync(); // sets the active model first
+            await reader.InitializeAsync(); // then restores prefs + last opened document
+        }
+        catch (Exception ex)
+        {
+            reader.ShowStartupFailure(ex.Message);
+            logger.LogError(ex, "Startup initialization failed.");
+        }
     }
 }
