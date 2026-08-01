@@ -1,3 +1,4 @@
+using BabelRead.App.Reading;
 using BabelRead.Core.Documents;
 using BabelRead.Core.Domain;
 using BabelRead.Core.Models;
@@ -55,6 +56,11 @@ public sealed partial class ReaderViewModel : ObservableObject
     private IReadOnlyList<string> _orderedSegments = [];      // every paragraph, in reading order
     private int[] _segmentCharOffsets = [];                    // where each paragraph starts in DisplayText
     private int[] _pageFirstSegment = [];                      // first paragraph index of each Core page
+
+    // Visual pagination: cuts DisplayText into viewport-sized pages at the view's reported size/font.
+    private readonly ReadingPaginator _paginator = new();
+    private ReadingPageMetrics? _metrics;
+    private int _pageStartOffset;
 
     [ObservableProperty]
     private string _title = "BabelRead";
@@ -150,6 +156,11 @@ public sealed partial class ReaderViewModel : ObservableObject
     /// runs on across page breaks (FR-013). Rebuilt as translations land and when the toggle flips.</summary>
     [ObservableProperty]
     private string? _displayText;
+
+    /// <summary>The current visual page: the slice of <see cref="DisplayText"/> that fills the window at
+    /// the current size and font. This is what the reading pane renders, not the whole flow.</summary>
+    [ObservableProperty]
+    private string? _visiblePageText;
 
     /// <summary>Character offset the view brings to the top of the reading pane. Set on navigation so a page
     /// turn scrolls the continuous flow to that page's first paragraph.</summary>
@@ -623,6 +634,35 @@ public sealed partial class ReaderViewModel : ObservableObject
         BuildContinuousText();
     }
 
+    /// <summary>The view reports the space the text actually gets (column width, viewport height, font),
+    /// on open and whenever the window is resized or the font zoomed. Re-slices the current page.</summary>
+    public void SetReadingMetrics(double columnWidth, double viewportHeight, Avalonia.Media.Typeface typeface)
+    {
+        if (columnWidth <= 0 || viewportHeight <= 0)
+        {
+            return;
+        }
+
+        _metrics = new ReadingPageMetrics(
+            columnWidth, viewportHeight, ReadingFontSize, ReadingLineHeight, typeface, ReadingFlowDirection);
+        ReSlice();
+    }
+
+    /// <summary>Recompute <see cref="VisiblePageText"/> from the flow, the current page start, and metrics.</summary>
+    private void ReSlice()
+    {
+        var text = DisplayText;
+        if (string.IsNullOrEmpty(text) || _metrics is not { } metrics)
+        {
+            VisiblePageText = text; // no metrics yet: show the flow so nothing is blank pre-layout
+            return;
+        }
+
+        _pageStartOffset = Math.Clamp(_pageStartOffset, 0, Math.Max(0, text.Length - 1));
+        var consumed = _paginator.MeasurePage(text, _pageStartOffset, metrics);
+        VisiblePageText = consumed <= 0 ? string.Empty : text.Substring(_pageStartOffset, consumed);
+    }
+
     /// <summary>Rebuilds the flow text from the store — each paragraph translated where held, original
     /// otherwise — and records where each paragraph starts so the view can scroll to a page's anchor.</summary>
     private void BuildContinuousText()
@@ -631,6 +671,7 @@ public sealed partial class ReaderViewModel : ObservableObject
         {
             _segmentCharOffsets = [];
             DisplayText = null;
+            ReSlice();
             return;
         }
 
@@ -660,6 +701,7 @@ public sealed partial class ReaderViewModel : ObservableObject
 
         _segmentCharOffsets = offsets;
         DisplayText = builder.ToString();
+        ReSlice();
     }
 
     /// <summary>Char offset in <see cref="DisplayText"/> where a Core page begins.</summary>

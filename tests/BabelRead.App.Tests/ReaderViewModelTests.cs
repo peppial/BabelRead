@@ -1,3 +1,4 @@
+using Avalonia.Headless.XUnit;
 using BabelRead.App.ViewModels;
 using BabelRead.Core.Documents;
 using BabelRead.Core.Domain;
@@ -40,6 +41,20 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.Equal("Page 1/2", vm.CurrentPageLabel);
         Assert.Contains("Bonjour", vm.OriginalText!, StringComparison.Ordinal);
         Assert.Contains("Bonjour", vm.TranslationText!, StringComparison.Ordinal); // fake echoes original
+    }
+
+    [AvaloniaFact]
+    public async Task Visible_page_text_is_a_prefix_of_the_whole_flow_once_metrics_are_set()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(CreatePdf(string.Join(" ", Enumerable.Repeat("word", 400))));
+
+        vm.SetReadingMetrics(columnWidth: 400, viewportHeight: 200,
+            typeface: Avalonia.Media.Typeface.Default);
+
+        Assert.False(string.IsNullOrEmpty(vm.VisiblePageText));
+        Assert.StartsWith(vm.VisiblePageText!, vm.DisplayText!, StringComparison.Ordinal);
+        Assert.True(vm.VisiblePageText!.Length < vm.DisplayText!.Length, "a long doc must not fit one page");
     }
 
     [Fact]
