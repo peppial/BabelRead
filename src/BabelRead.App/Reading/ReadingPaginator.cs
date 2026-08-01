@@ -58,4 +58,54 @@ public sealed class ReadingPaginator
 
         return Math.Min(consumed, remaining.Length);
     }
+
+    /// <summary>The 0-based visual page index and start offset of the page containing
+    /// <paramref name="charOffset"/> (clamped into range).</summary>
+    public (int PageIndex, int PageStart) PageContaining(string text, int charOffset, ReadingPageMetrics metrics)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return (0, 0);
+        }
+
+        var target = Math.Clamp(charOffset, 0, text.Length - 1);
+        var start = 0;
+        var index = 0;
+        while (true)
+        {
+            var consumed = MeasurePage(text, start, metrics);
+            if (consumed <= 0 || start + consumed > target || start + consumed >= text.Length)
+            {
+                return (index, start);
+            }
+
+            start += consumed;
+            index++;
+        }
+    }
+
+    /// <summary>Total number of visual pages in <paramref name="text"/> at these metrics.</summary>
+    public int CountPages(string text, ReadingPageMetrics metrics)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        var start = 0;
+        var pages = 0;
+        while (start < text.Length)
+        {
+            var consumed = MeasurePage(text, start, metrics);
+            if (consumed <= 0)
+            {
+                break;
+            }
+
+            start += consumed;
+            pages++;
+        }
+
+        return pages;
+    }
 }

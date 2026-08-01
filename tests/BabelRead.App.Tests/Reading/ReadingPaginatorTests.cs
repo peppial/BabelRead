@@ -69,4 +69,43 @@ public class ReadingPaginatorTests
         Assert.Equal(0, paginator.MeasurePage("", 0, Metrics()));
         Assert.Equal(0, paginator.MeasurePage("abc", 3, Metrics()));
     }
+
+    [AvaloniaFact]
+    public void PageContaining_returns_the_page_whose_range_brackets_the_offset()
+    {
+        var paginator = new ReadingPaginator();
+        var text = LongText();
+        var metrics = Metrics();
+
+        // Discover real page boundaries.
+        var starts = new List<int> { 0 };
+        var cursor = 0;
+        while (cursor < text.Length)
+        {
+            cursor += paginator.MeasurePage(text, cursor, metrics);
+            if (cursor < text.Length) starts.Add(cursor);
+        }
+
+        Assert.True(starts.Count >= 3, "need several pages for a meaningful test");
+
+        // An offset just inside page 2 must resolve to page index 2 and page 2's start.
+        var probe = starts[2] + 1;
+        var (pageIndex, pageStart) = paginator.PageContaining(text, probe, metrics);
+        Assert.Equal(2, pageIndex);
+        Assert.Equal(starts[2], pageStart);
+
+        Assert.Equal(starts.Count, paginator.CountPages(text, metrics));
+    }
+
+    [AvaloniaFact]
+    public void PageContaining_clamps_offsets_past_the_end_to_the_last_page()
+    {
+        var paginator = new ReadingPaginator();
+        var text = LongText();
+        var metrics = Metrics();
+
+        var last = paginator.CountPages(text, metrics) - 1;
+        var (pageIndex, _) = paginator.PageContaining(text, text.Length + 999, metrics);
+        Assert.Equal(last, pageIndex);
+    }
 }
