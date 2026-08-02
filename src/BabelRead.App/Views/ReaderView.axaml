@@ -27,26 +27,20 @@
   </UserControl.Styles>
 
   <Panel>
-    <!-- Reading surface fills the whole area; the toolbar floats over the top of it. -->
-    <ScrollViewer Name="ReadingScroll" IsVisible="{Binding IsContentVisible}"
-                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                  AllowAutoHide="False">
-      <!-- Host that is always at least a screenful tall, so a short page (a chapter's last page) is
-           centred in the window like a printed book instead of clinging to the top. A full page grows the
-           host past the viewport and scrolls from the top as usual. -->
-      <Panel MinHeight="{Binding #ReadingScroll.Bounds.Height}">
-        <!-- Centered, justified column with a comfortable measure. The inset is a margin on the text (not
-             ScrollViewer padding, which is left out of the scroll extent and would hide the last line). The
-             top inset clears the floating toolbar. -->
-        <SelectableTextBlock Name="PageText" Text="{Binding DisplayText}"
-                             FlowDirection="{Binding ReadingFlowDirection}"
-                             AutomationProperties.Name="Page text"
-                             TextWrapping="Wrap" TextAlignment="Justify"
-                             Margin="24,72,24,56" MaxWidth="720"
-                             HorizontalAlignment="Center" VerticalAlignment="Center"
-                             FontSize="{Binding ReadingFontSize}" LineHeight="{Binding ReadingLineHeight}" />
-      </Panel>
-    </ScrollViewer>
+    <!-- Reading surface fills the whole area; the toolbar floats over the top of it. One viewport-sized
+         visual page is shown at a time and clipped — no scrollbar. Turning advances one page; a paragraph
+         fills to the bottom and continues at the top of the next page (printed-book style). -->
+    <Panel Name="ReadingSurface" IsVisible="{Binding IsContentVisible}" ClipToBounds="True">
+      <!-- Centered, justified column with a comfortable measure. The inset is a margin on the text; the top
+           inset clears the floating toolbar. The paginator subtracts these to know the space the text gets. -->
+      <SelectableTextBlock Name="PageText" Text="{Binding VisiblePageText}"
+                           FlowDirection="{Binding ReadingFlowDirection}"
+                           AutomationProperties.Name="Page text"
+                           TextWrapping="Wrap" TextAlignment="Justify"
+                           Margin="24,72,24,56" MaxWidth="720"
+                           HorizontalAlignment="Center" VerticalAlignment="Top"
+                           FontSize="{Binding ReadingFontSize}" LineHeight="{Binding ReadingLineHeight}" />
+    </Panel>
 
     <controls:StatePanel IsVisible="{Binding IsStatusVisible}"
                          Message="{Binding StatusMessage}"

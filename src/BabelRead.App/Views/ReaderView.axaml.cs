@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using BabelRead.App.ViewModels;
@@ -14,10 +15,6 @@ public partial class ReaderView : UserControl
 {
     private const int ReflowDebounceMs = 250;
 
-    /// <summary>Width the vertical scrollbar takes from the text; reserved always, so that the scrollbar
-    /// appearing or disappearing cannot change how the document is paginated.</summary>
-    private const double ScrollBarGutter = 16;
-
     // The reading inset and column cap — must match the PageText margin and MaxWidth in ReaderView.axaml,
     // since pagination subtracts them to know the space the text actually gets.
     private const double ReadingInsetX = 24;
@@ -28,7 +25,7 @@ public partial class ReaderView : UserControl
     // The floating toolbar hides this long after the reader stops moving the pointer.
     private static readonly TimeSpan ToolbarIdleTimeout = TimeSpan.FromSeconds(3);
 
-    private readonly ScrollViewer _readingScroll;
+    private readonly Panel _readingSurface;
     private readonly Border _toolbar;
     private readonly DispatcherTimer _toolbarHideTimer;
     private bool _pointerOverToolbar;
@@ -43,14 +40,14 @@ public partial class ReaderView : UserControl
         AvaloniaXamlLoader.Load(this);
         this.FindControl<Button>("OpenButton")!.Click += OnOpenClicked;
         this.FindControl<Button>("SettingsButton")!.Click += (_, _) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
-        _readingScroll = this.FindControl<ScrollViewer>("ReadingScroll")!;
+        _readingSurface = this.FindControl<Panel>("ReadingSurface")!;
         _toolbar = this.FindControl<Border>("Toolbar")!;
 
-        // Repaginate only when the reading surface is actually resized. Reflowing on text changes would
-        // feed back on itself: a landing translation changes the text, which changes the layout, which
-        // repaginates the book under the reader's feet.
+        // Re-measure the visual page only when the reading surface is actually resized. Reflowing on text
+        // changes would feed back on itself: a landing translation changes the text, which changes the
+        // layout, which would re-slice the page under the reader's eyes.
         SizeChanged += (_, _) => ScheduleReflow();
-        _readingScroll.SizeChanged += (_, _) => ScheduleReflow();
+        _readingSurface.SizeChanged += (_, _) => ScheduleReflow();
 
         // Floating toolbar: reveal on pointer movement, hide again once the reader settles into reading.
         _toolbarHideTimer = new DispatcherTimer { Interval = ToolbarIdleTimeout };
@@ -100,7 +97,7 @@ public partial class ReaderView : UserControl
         // Paging and zoom keys tunnel from the window so they win over whatever holds focus (a toolbar
         // button, the scroll viewer, the selectable text, or nothing at all).
         TopLevel.GetTopLevel(this)?.AddHandler(KeyDownEvent, OnReaderKeyDown, RoutingStrategies.Tunnel);
-        _readingScroll.Focus();
+        _readingSurface.Focus();
 
         if (ViewModel is not null)
         {
@@ -132,12 +129,6 @@ public partial class ReaderView : UserControl
             {
                 Dispatcher.UIThread.Post(action);
             }
-        }
-
-        // A new page starts at the top, however far down the previous one was scrolled.
-        if (e.PropertyName == nameof(ReaderViewModel.PageNumber))
-        {
-            OnUi(() => _readingScroll.Offset = default);
         }
 
         // Bring the toolbar back whenever the reader isn't reading (opening, error, empty) so its controls
@@ -175,7 +166,7 @@ public partial class ReaderView : UserControl
         if (!string.IsNullOrEmpty(path))
         {
             await ViewModel.OpenAsync(path);
-            _readingScroll.Focus();
+            _readingSurface.Focus();
         }
     }
 
@@ -258,15 +249,13 @@ public partial class ReaderView : UserControl
                     return;
                 }
 
-                // Bounds, not Viewport: Viewport narrows when the vertical scrollbar appears, and the
-                // scrollbar appears because of how much text is on the page — repaginating on that would
-                // change the page again, and so on. Subtract the text inset and a fixed scrollbar gutter
-                // instead, and cap the width at the centered column's measure, so the paginator sees the
-                // space the text really gets, independent of the text.
+                // Subtract the text inset and cap the width at the centered column's measure, so the
+                // paginator measures against exactly the space the text is drawn in. There is no scrollbar
+                // now, so no gutter to reserve.
                 var columnWidth = Math.Min(
-                    _readingScroll.Bounds.Width - (ReadingInsetX * 2) - ScrollBarGutter,
+                    _readingSurface.Bounds.Width - (ReadingInsetX * 2),
                     ReadingColumnMaxWidth);
-                var size = new Size(columnWidth, _readingScroll.Bounds.Height - ReadingInsetTop - ReadingInsetBottom);
+                var size = new Size(columnWidth, _readingSurface.Bounds.Height - ReadingInsetTop - ReadingInsetBottom);
 
                 if (size.Width <= 0 || size.Height <= 0)
                 {
@@ -275,11 +264,13 @@ public partial class ReaderView : UserControl
 
                 if (Math.Abs(size.Width - _lastReflowSize.Width) < 1 && Math.Abs(size.Height - _lastReflowSize.Height) < 1)
                 {
-                    return; // same surface as last time — nothing to repaginate
+                    return; // same surface as last time — the page slice would not change
                 }
 
                 _lastReflowSize = size;
-                await ViewModel.ReflowForViewportAsync(size.Width, size.Height);
+                var pageText = this.FindControl<SelectableTextBlock>("PageText");
+                var typeface = pageText is not null ? new Typeface(pageText.FontFamily) : Typeface.Default;
+                ViewModel.SetReadingMetrics(size.Width, size.Height, typeface);
             }
             catch (OperationCanceledException)
             {

@@ -21,12 +21,6 @@ namespace BabelRead.App.ViewModels;
 /// </summary>
 public sealed partial class ReaderViewModel : ObservableObject
 {
-    /// <summary>Fraction of the page the paginator aims to fill, leaving the rest free for a translation
-    /// that runs longer than its source text — the reserve that keeps pages from overflowing into a scroll.
-    /// Kept fairly generous: most target languages run only modestly longer than the source, so reserving
-    /// too much just leaves the window looking half-empty. A page that does overflow simply scrolls.</summary>
-    private const double TranslationGrowthAllowance = 0.8;
-
     /// <summary>Fallback reading surface, used only before the view has reported its real size.</summary>
     private const double BaselineLayoutWidth = 1280;
     private const double BaselineLayoutHeight = 800;
@@ -44,8 +38,6 @@ public sealed partial class ReaderViewModel : ObservableObject
     private LanguageCode _target = new("en");
     private LanguageCode? _sourceOverride;
     private int _currentIndex;
-    private double _viewportWidth;
-    private double _viewportHeight;
     private CancellationTokenSource? _pageCts;
     private readonly SemaphoreSlim _preferencesGate = new(1, 1);
     private readonly SynchronizationContext? _uiContext = SynchronizationContext.Current;
@@ -61,6 +53,7 @@ public sealed partial class ReaderViewModel : ObservableObject
     private readonly ReadingPaginator _paginator = new();
     private ReadingPageMetrics? _metrics;
     private int _pageStartOffset;
+    private readonly Stack<int> _visitedPageStarts = new();  // page starts we can pop straight back to
 
     [ObservableProperty]
     private string _title = "BabelRead";
@@ -162,11 +155,6 @@ public sealed partial class ReaderViewModel : ObservableObject
     [ObservableProperty]
     private string? _visiblePageText;
 
-    /// <summary>Character offset the view brings to the top of the reading pane. Set on navigation so a page
-    /// turn scrolls the continuous flow to that page's first paragraph.</summary>
-    [ObservableProperty]
-    private int _readingCharOffset;
-
     /// <summary>Right-to-left when showing a translation into an RTL language (Arabic, Hebrew, ...).</summary>
     public Avalonia.Media.FlowDirection ReadingFlowDirection =>
         ShowingTranslation && _target.IsRightToLeft
@@ -250,7 +238,11 @@ public sealed partial class ReaderViewModel : ObservableObject
 
         if (_document is not null)
         {
-            await GoToPageAsync(_currentIndex, ReadingDirection.Forward).ConfigureAwait(true);
+            BuildContinuousText();
+            // The Core page is unchanged but the language is not, so force a re-translation of it rather than
+            // letting the "same page" fast-path skip the work.
+            _currentIndex = -1;
+            await TranslateVisiblePageAsync(ReadingDirection.Forward).ConfigureAwait(true);
         }
     }
 
@@ -266,7 +258,9 @@ public sealed partial class ReaderViewModel : ObservableObject
                 .ConfigureAwait(true);
 
             _prefetch.CancelPending();
-            await GoToPageAsync(_currentIndex, ReadingDirection.Forward).ConfigureAwait(true);
+            BuildContinuousText();
+            _currentIndex = -1; // force a re-translation of the current Core page under the new source language
+            await TranslateVisiblePageAsync(ReadingDirection.Forward).ConfigureAwait(true);
         }
     }
 
@@ -322,40 +316,6 @@ public sealed partial class ReaderViewModel : ObservableObject
     [RelayCommand]
     public Task OpenAsync(string path) => OpenInternalAsync(path);
 
-    public async Task ReflowForViewportAsync(double viewportWidth, double viewportHeight)
-    {
-        _viewportWidth = viewportWidth;
-        _viewportHeight = viewportHeight;
-
-        if (_document is null || _reader is null)
-        {
-            return;
-        }
-
-        // A larger font fits less text, so shrink the viewport the pagination heuristic sees. Shrink it
-        // again by a safety margin: pages are measured in source characters, but what gets displayed is
-        // the translation, which is usually longer (and paragraph gaps cost height no character count
-        // sees). Without the margin a page that "fits" as English overflows once translated.
-        var fontScale = ReadingFontSizes.PaginationBaseline / ReadingFontSize;
-        var effectiveWidth = viewportWidth * fontScale;
-        var effectiveHeight = viewportHeight * fontScale * TranslationGrowthAllowance;
-
-        if (_reader is not IReflowableDocumentReader reflowable
-            || !reflowable.UpdateViewport(effectiveWidth, effectiveHeight))
-        {
-            return;
-        }
-
-        // Keep reading position approximately stable after reflow by mapping by progress ratio.
-        var previousPageCount = Math.Max(1, _document.PageCount);
-        var previousIndex = _currentIndex;
-        _document = await _reader.OpenAsync(_document.SourcePath, CancellationToken.None).ConfigureAwait(true);
-        PageCount = _document.PageCount;
-        var ratio = (double)previousIndex / previousPageCount;
-        var mappedIndex = Math.Clamp((int)Math.Round(ratio * _document.PageCount, MidpointRounding.AwayFromZero), 0, Math.Max(0, _document.PageCount - 1));
-        await GoToPageAsync(mappedIndex, ReadingDirection.Forward).ConfigureAwait(true);
-    }
-
     private async Task OpenInternalAsync(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -389,7 +349,14 @@ public sealed partial class ReaderViewModel : ObservableObject
             var startIndex = prefs.LastReadPageByDocument.TryGetValue(_document.Id, out var savedIndex)
                 ? Math.Clamp(savedIndex, 0, _document.PageCount - 1)
                 : 0;
-            await GoToPageAsync(startIndex, ReadingDirection.Forward).ConfigureAwait(true);
+
+            // Start reading at the visual page that opens this Core page, then translate/prefetch around it.
+            _pageStartOffset = PageStartCharOffset(startIndex);
+            _visitedPageStarts.Clear();
+            ReSlice();
+            RecountVisualPages();
+            UpdateNavigation();
+            await TranslateVisiblePageAsync(ReadingDirection.Forward).ConfigureAwait(true);
         }
         catch (DocumentOpenException ex)
         {
@@ -403,29 +370,93 @@ public sealed partial class ReaderViewModel : ObservableObject
     // AllowConcurrentExecutions: without it the generated async command reports CanExecute = false for as
     // long as a page is translating, which greys the toolbar button out mid-translation. Turning a page
     // already cancels the in-flight one (_pageCts), so overlapping calls are safe.
+    //
+    // Turning a page now advances the *visual* page — the viewport-sized slice of the continuous flow — so a
+    // paragraph runs on across the break and every screen fills top to bottom. The Core page (translation
+    // batch / prefetch anchor) is derived from wherever the visual page starts.
     [RelayCommand(AllowConcurrentExecutions = true)]
-    public Task NextPageAsync() =>
-        _document is null || _currentIndex + 1 >= _document.PageCount
-            ? Task.CompletedTask
-            : GoToPageAsync(_currentIndex + 1, ReadingDirection.Forward);
-
-    [RelayCommand(AllowConcurrentExecutions = true)]
-    public Task PreviousPageAsync() =>
-        _document is null || _currentIndex - 1 < 0
-            ? Task.CompletedTask
-            : GoToPageAsync(_currentIndex - 1, ReadingDirection.Backward);
-
-    /// <summary>Jump to a 1-based page number.</summary>
-    public Task JumpToPageAsync(int oneBasedPageNumber)
+    public async Task NextPageAsync()
     {
-        if (_document is null)
+        var text = DisplayText;
+        if (string.IsNullOrEmpty(text) || _metrics is not { } metrics)
         {
-            return Task.CompletedTask;
+            return;
         }
 
-        var index = Math.Clamp(oneBasedPageNumber - 1, 0, _document.PageCount - 1);
-        var direction = index >= _currentIndex ? ReadingDirection.Forward : ReadingDirection.Backward;
-        return GoToPageAsync(index, direction);
+        var consumed = _paginator.MeasurePage(text, _pageStartOffset, metrics);
+        var next = _pageStartOffset + consumed;
+        if (consumed <= 0 || next >= text.Length)
+        {
+            return; // already on the last visual page
+        }
+
+        _visitedPageStarts.Push(_pageStartOffset);
+        _pageStartOffset = next;
+        await OnVisualPageChangedAsync(ReadingDirection.Forward).ConfigureAwait(true);
+    }
+
+    [RelayCommand(AllowConcurrentExecutions = true)]
+    public async Task PreviousPageAsync()
+    {
+        if (_pageStartOffset <= 0 || _metrics is null)
+        {
+            return;
+        }
+
+        // O(1) when we have history for this page; otherwise re-walk from the start to find the previous one.
+        _pageStartOffset = _visitedPageStarts.Count > 0
+            ? _visitedPageStarts.Pop()
+            : PreviousStartByRewalk();
+        await OnVisualPageChangedAsync(ReadingDirection.Backward).ConfigureAwait(true);
+    }
+
+    /// <summary>The start offset of the visual page immediately before the current one, found by walking
+    /// pages from the document start (used when the back-stack is empty, e.g. after a resize or jump).</summary>
+    private int PreviousStartByRewalk()
+    {
+        if (DisplayText is not { } text || _metrics is not { } metrics || _pageStartOffset <= 0)
+        {
+            return 0;
+        }
+
+        var start = 0;
+        while (true)
+        {
+            var consumed = _paginator.MeasurePage(text, start, metrics);
+            if (consumed <= 0 || start + consumed >= _pageStartOffset)
+            {
+                return start;
+            }
+
+            start += consumed;
+        }
+    }
+
+    /// <summary>Jump to a 1-based visual page number.</summary>
+    public async Task JumpToPageAsync(int oneBasedPageNumber)
+    {
+        if (DisplayText is not { } text || _metrics is not { } metrics || text.Length == 0)
+        {
+            return;
+        }
+
+        var target = Math.Max(0, oneBasedPageNumber - 1);
+        var start = 0;
+        for (var p = 0; p < target; p++)
+        {
+            var consumed = _paginator.MeasurePage(text, start, metrics);
+            if (consumed <= 0 || start + consumed >= text.Length)
+            {
+                break;
+            }
+
+            start += consumed;
+        }
+
+        var direction = start >= _pageStartOffset ? ReadingDirection.Forward : ReadingDirection.Backward;
+        _pageStartOffset = start;
+        _visitedPageStarts.Clear();
+        await OnVisualPageChangedAsync(direction).ConfigureAwait(true);
     }
 
     [RelayCommand]
@@ -450,42 +481,76 @@ public sealed partial class ReaderViewModel : ObservableObject
         ReadingFontSize = clamped;
         await UpdatePreferencesAsync(prefs => prefs.ReadingFontSize = clamped).ConfigureAwait(true);
 
-        if (_viewportWidth > 0 && _viewportHeight > 0)
+        // A different font size means different-sized pages; re-measure the current page in place so the
+        // reader stays on roughly the same text (the back-stack's offsets were measured at the old font).
+        if (_metrics is { } m)
         {
-            await ReflowForViewportAsync(_viewportWidth, _viewportHeight).ConfigureAwait(true);
+            _metrics = m with { FontSize = ReadingFontSize, LineHeight = ReadingLineHeight };
+            _visitedPageStarts.Clear();
+            ReSlice();
+            RecountVisualPages();
+            UpdateNavigation();
         }
     }
 
     [RelayCommand]
     public Task RetryAsync() =>
-        _document is null ? Task.CompletedTask : GoToPageAsync(_currentIndex, ReadingDirection.Forward);
+        _document is null ? Task.CompletedTask : TranslateVisiblePageAsync(ReadingDirection.Forward);
 
-    private async Task GoToPageAsync(int index, ReadingDirection direction, bool scrollIntoView = true)
+    /// <summary>After the visual page moves: re-slice the text on screen, renumber, refresh nav, and
+    /// translate/prefetch the Core page the new visual page lands on.</summary>
+    private Task OnVisualPageChangedAsync(ReadingDirection direction)
+    {
+        ReSlice();
+        RecountVisualPages();
+        UpdateNavigation();
+        return TranslateVisiblePageAsync(direction);
+    }
+
+    /// <summary>Current visual page number and total, for the reader's position label. Cheap-ish but walks
+    /// the whole flow, so it runs on navigation/metrics/font changes — not on every background segment.</summary>
+    private void RecountVisualPages()
+    {
+        if (DisplayText is not { } text || _metrics is not { } metrics || text.Length == 0)
+        {
+            PageCount = 0;
+            PageNumber = 0;
+            return;
+        }
+
+        PageCount = _paginator.CountPages(text, metrics);
+        var (index, _) = _paginator.PageContaining(text, _pageStartOffset, metrics);
+        PageNumber = index + 1;
+    }
+
+    /// <summary>Map the current visual page to the Core page it starts in, make that the active page, and
+    /// translate/prefetch it — so on-demand translation and the Off cap follow the reader's real position.</summary>
+    private async Task TranslateVisiblePageAsync(ReadingDirection direction)
     {
         if (_document is null || _reader is null)
         {
             return;
         }
 
+        var coreIndex = CorePageForOffset(_pageStartOffset);
+
+        // Paging within a Core page that is already on screen needs no re-translation or re-prefetch.
+        if (coreIndex == _currentIndex && State == ReaderState.Content)
+        {
+            await PersistLastReadPageAsync(coreIndex).ConfigureAwait(true);
+            return;
+        }
+
+        _currentIndex = coreIndex;
+
         _pageCts?.Cancel();
         _pageCts?.Dispose();
         _pageCts = new CancellationTokenSource();
         var token = _pageCts.Token;
 
-        _currentIndex = index;
-        PageNumber = index + 1;
-        UpdateNavigation();
-
-        // Scroll the continuous flow to this page's first paragraph (except when this call was itself
-        // triggered by the reader scrolling there manually).
-        if (scrollIntoView)
-        {
-            ReadingCharOffset = PageStartCharOffset(index);
-        }
-
         try
         {
-            var page = await _reader.GetPageAsync(_document, index, token).ConfigureAwait(true);
+            var page = await _reader.GetPageAsync(_document, coreIndex, token).ConfigureAwait(true);
             if (token.IsCancellationRequested)
             {
                 return;
@@ -507,7 +572,7 @@ public sealed partial class ReaderViewModel : ObservableObject
             }
 
             // After the page is on screen: neither the reader nor the view waits on this file write.
-            await PersistLastReadPageAsync(page.Index).ConfigureAwait(true);
+            await PersistLastReadPageAsync(coreIndex).ConfigureAwait(true);
             SchedulePrefetch(direction);
         }
         catch (OperationCanceledException)
@@ -520,10 +585,13 @@ public sealed partial class ReaderViewModel : ObservableObject
             {
                 State = ReaderState.Error;
                 StatusMessage = "Could not load this page. Try again.";
-                _logger.LogWarning(ex, "Failed to load page {Index}.", index);
+                _logger.LogWarning(ex, "Failed to load page {Index}.", coreIndex);
             }
         }
     }
+
+    /// <summary>The Core page index whose segments contain a char offset in the flow.</summary>
+    private int CorePageForOffset(int charOffset) => PageForSegment(SegmentIndexAtOffset(charOffset));
 
     private async Task TranslateCurrentAsync(Page page, CancellationToken token)
     {
@@ -600,8 +668,10 @@ public sealed partial class ReaderViewModel : ObservableObject
 
     private void UpdateNavigation()
     {
-        CanGoPrevious = _document is not null && _currentIndex > 0;
-        CanGoNext = _document is not null && _currentIndex + 1 < _document.PageCount;
+        var text = DisplayText;
+        CanGoPrevious = _metrics is not null && _pageStartOffset > 0;
+        CanGoNext = _metrics is { } m && !string.IsNullOrEmpty(text)
+            && _pageStartOffset + _paginator.MeasurePage(text!, _pageStartOffset, m) < text!.Length;
     }
 
     /// <summary>Sets up the continuous reading flow for a freshly opened (or repaginated) document: the
@@ -645,7 +715,12 @@ public sealed partial class ReaderViewModel : ObservableObject
 
         _metrics = new ReadingPageMetrics(
             columnWidth, viewportHeight, ReadingFontSize, ReadingLineHeight, typeface, ReadingFlowDirection);
+
+        // Offsets on the back-stack were measured at the old size; a resize invalidates them.
+        _visitedPageStarts.Clear();
         ReSlice();
+        RecountVisualPages();
+        UpdateNavigation();
     }
 
     /// <summary>Recompute <see cref="VisiblePageText"/> from the flow, the current page start, and metrics.</summary>
@@ -716,28 +791,13 @@ public sealed partial class ReaderViewModel : ObservableObject
         return _segmentCharOffsets[Math.Clamp(segment, 0, _segmentCharOffsets.Length - 1)];
     }
 
-    /// <summary>The view reports the paragraph now at the top of the reading pane (as a char offset); we
-    /// map it to the owning Core page and translate/prefetch around it, without scrolling back.</summary>
-    public Task OnScrolledToCharOffsetAsync(int charOffset)
-    {
-        if (_document is null || _pageFirstSegment.Length == 0)
-        {
-            return Task.CompletedTask;
-        }
-
-        var segment = SegmentIndexAtOffset(charOffset);
-        var page = PageForSegment(segment);
-        if (page == _currentIndex)
-        {
-            return Task.CompletedTask;
-        }
-
-        var direction = page >= _currentIndex ? ReadingDirection.Forward : ReadingDirection.Backward;
-        return GoToPageAsync(page, direction, scrollIntoView: false);
-    }
-
     private int SegmentIndexAtOffset(int charOffset)
     {
+        if (_segmentCharOffsets.Length == 0)
+        {
+            return 0;
+        }
+
         var i = Array.BinarySearch(_segmentCharOffsets, charOffset);
         if (i >= 0)
         {
@@ -907,19 +967,10 @@ public sealed partial class ReaderViewModel : ObservableObject
             await CollectAsync(layout).ConfigureAwait(true);
         }
 
-        // Put the reader back on the layout the reading surface actually calls for.
-        if (_viewportWidth > 0 && _viewportHeight > 0)
-        {
-            var fontScale = ReadingFontSizes.PaginationBaseline / ReadingFontSize;
-            reflowable.UpdateViewport(_viewportWidth * fontScale, _viewportHeight * fontScale * TranslationGrowthAllowance);
-        }
-        else
-        {
-            reflowable.UpdateViewport(BaselineLayoutWidth, BaselineLayoutHeight);
-        }
-
+        // Put the reader back on a sensible default layout; the visual paginator drives display now, and the
+        // continuous flow is rebuilt from the document's segments regardless of Core page size.
+        reflowable.UpdateViewport(BaselineLayoutWidth, BaselineLayoutHeight);
         _document = await _reader.OpenAsync(document.SourcePath, CancellationToken.None).ConfigureAwait(true);
-        PageCount = _document.PageCount;
         return byHash;
     }
 

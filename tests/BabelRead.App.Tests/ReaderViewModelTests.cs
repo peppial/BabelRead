@@ -29,16 +29,38 @@ public sealed class ReaderViewModelTests : IDisposable
 
     private string CreatePdf(params string[] pages) => SampleDocuments.CreatePdf(Path.Combine(_dir, $"{Guid.NewGuid():n}.pdf"), pages);
 
-    [Fact]
+    /// <summary>Report a reading surface to the view-model so it paginates into visual pages. Small by
+    /// default so even modest test text spans several pages.</summary>
+    private static void SetMetrics(ReaderViewModel vm, double width = 360, double height = 180) =>
+        vm.SetReadingMetrics(width, height, Avalonia.Media.Typeface.Default);
+
+    /// <summary>A page whose text is long enough to span several visual pages, tagged with a marker word.</summary>
+    private static string Long(string marker, int words = 160) =>
+        string.Join(" ", Enumerable.Repeat(marker, words));
+
+    /// <summary>Turn visual pages forward until the visible page shows <paramref name="marker"/> (or we run out).</summary>
+    private static async Task PageForwardUntilVisibleAsync(ReaderViewModel vm, string marker)
+    {
+        var guard = 0;
+        while (vm.CanGoNext
+            && vm.VisiblePageText?.Contains(marker, StringComparison.Ordinal) != true
+            && guard++ < 1000)
+        {
+            await vm.NextPageAsync();
+        }
+    }
+
+    [AvaloniaFact]
     public async Task Opening_a_document_translates_the_first_page()
     {
         var vm = CreateViewModel();
         await vm.OpenAsync(CreatePdf("Bonjour le monde", "Deuxieme page"));
+        SetMetrics(vm);
 
         Assert.Equal(ReaderState.Content, vm.State);
-        Assert.Equal(2, vm.PageCount);
         Assert.Equal(1, vm.PageNumber);
-        Assert.Equal("Page 1/2", vm.CurrentPageLabel);
+        Assert.True(vm.PageCount >= 1);
+        Assert.Equal($"Page 1/{vm.PageCount}", vm.CurrentPageLabel);
         Assert.Contains("Bonjour", vm.OriginalText!, StringComparison.Ordinal);
         Assert.Contains("Bonjour", vm.TranslationText!, StringComparison.Ordinal); // fake echoes original
     }
@@ -57,20 +79,23 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.True(vm.VisiblePageText!.Length < vm.DisplayText!.Length, "a long doc must not fit one page");
     }
 
-    [Fact]
-    public async Task Navigating_next_updates_page_and_translation_in_sync()
+    [AvaloniaFact]
+    public async Task Paging_forward_reaches_and_translates_later_content()
     {
         var vm = CreateViewModel();
-        await vm.OpenAsync(CreatePdf("First page text", "Second page text"));
+        await vm.OpenAsync(CreatePdf(Long("First"), Long("Second")));
+        SetMetrics(vm);
 
-        await vm.NextPageAsync();
+        Assert.Equal(1, vm.PageNumber);
+        Assert.True(vm.PageCount > 1);
+        Assert.False(vm.CanGoPrevious);
 
-        Assert.Equal(2, vm.PageNumber);
-        Assert.Equal("Page 2/2", vm.CurrentPageLabel);
-        Assert.Contains("Second", vm.OriginalText!, StringComparison.Ordinal);
-        Assert.Contains("Second", vm.TranslationText!, StringComparison.Ordinal);
+        await PageForwardUntilVisibleAsync(vm, "Second");
+
+        Assert.Contains("Second", vm.VisiblePageText!, StringComparison.Ordinal);
+        Assert.Contains("Second", vm.TranslationText!, StringComparison.Ordinal); // its Core page was translated
+        Assert.True(vm.PageNumber > 1);
         Assert.True(vm.CanGoPrevious);
-        Assert.False(vm.CanGoNext);
     }
 
     [Fact]
@@ -97,7 +122,7 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.True(_fake.CallCount <= 4, $"Off should stop after the page + 2 ahead, but {_fake.CallCount} pages were translated.");
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Off_mode_stays_bounded_even_when_the_view_reflows_repeatedly()
     {
         var translation = new TranslationService(new StubChatClientFactory(_fake), _store);
@@ -114,7 +139,7 @@ public sealed class ReaderViewModelTests : IDisposable
         // times at different sizes, as the window and toolbar settle. Each re-opens and reschedules prefetch.
         for (var i = 0; i < 6; i++)
         {
-            await vm.ReflowForViewportAsync(900 - (i * 5), 1100 - (i * 5));
+            vm.SetReadingMetrics(900 - (i * 5), 1100 - (i * 5), Avalonia.Media.Typeface.Default);
             await coordinator.PendingTask;
         }
 
@@ -147,16 +172,25 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.Null(vm.TranslationText);
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Revisiting_a_page_reuses_the_cached_translation()
     {
         var vm = CreateViewModel();
-        await vm.OpenAsync(CreatePdf("Page one", "Page two"));
-        await vm.NextPageAsync();      // page 2 → call 2
-        await vm.PreviousPageAsync();  // page 1 → cache hit, no new call
+        await vm.OpenAsync(CreatePdf(Long("one"), Long("two")));
+        SetMetrics(vm);
 
+        await PageForwardUntilVisibleAsync(vm, "two"); // reaches and translates the second Core page → call 2
         Assert.Equal(2, _fake.CallCount);
+
+        // Page all the way back to the first Core page — served from cache, no new model call.
+        var guard = 0;
+        while (vm.CanGoPrevious && guard++ < 1000)
+        {
+            await vm.PreviousPageAsync();
+        }
+
         Assert.Equal(1, vm.PageNumber);
+        Assert.Equal(2, _fake.CallCount);
         Assert.Equal(ReaderState.Content, vm.State);
     }
 
@@ -175,11 +209,11 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.Equal(1, _fake.CallCount); // served from the persisted cache
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Repaginating_the_book_does_not_lose_a_single_translation()
     {
         // The whole point of translating segments rather than pages: re-cutting the book into different
-        // pages regroups segments, so nothing has to be translated twice.
+        // visual pages regroups segments, so nothing has to be translated twice.
         var epub = SampleDocuments.CreateEpub(
             Path.Combine(_dir, "book.epub"),
             "Book",
@@ -188,8 +222,9 @@ public sealed class ReaderViewModelTests : IDisposable
 
         var vm = CreateViewModel();
         await vm.OpenAsync(epub);
+        vm.SetReadingMetrics(400, 300, Avalonia.Media.Typeface.Default);
 
-        // Translate the whole book at the initial pagination.
+        // Read through the whole book, translating the Core page each visual page lands on.
         while (vm.CanGoNext)
         {
             await vm.NextPageAsync();
@@ -199,8 +234,8 @@ public sealed class ReaderViewModelTests : IDisposable
         var segmentsBefore = vm.TranslatedSegments;
         Assert.True(segmentsBefore > 0);
 
-        // Repaginate hard (a much smaller reading surface → many more, smaller pages).
-        await vm.ReflowForViewportAsync(400, 300);
+        // Repaginate hard (a much smaller reading surface → many more, smaller visual pages).
+        vm.SetReadingMetrics(240, 200, Avalonia.Media.Typeface.Default);
         await vm.JumpToPageAsync(1);
         while (vm.CanGoNext)
         {
@@ -211,7 +246,7 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.Equal(segmentsBefore, vm.TranslatedSegments);
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task While_a_page_translates_the_original_text_is_shown_instead_of_a_blank_pane()
     {
         var slow = new FakeChatClient(delay: TimeSpan.FromSeconds(2));
@@ -223,30 +258,50 @@ public sealed class ReaderViewModelTests : IDisposable
             new NoOpPrefetchCoordinator(),
             new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
 
-        await vm.OpenAsync(CreatePdf("First page text", "Second page text"));
-        Assert.Equal(ReaderState.Content, vm.State); // page 1 translated
+        // A translated first Core page then a long, still-untranslated second one whose translation is slow.
+        await vm.OpenAsync(CreatePdf(Long("First"), Long("Second")));
+        SetMetrics(vm);
+        Assert.Equal(ReaderState.Content, vm.State); // the first Core page is translated
 
-        var turning = vm.NextPageAsync(); // page 2 is not translated yet
-        var deadline = DateTime.UtcNow.AddSeconds(1); // page text is extracted long before the model replies
-        while (DateTime.UtcNow < deadline && vm.OriginalText?.Contains("Second", StringComparison.Ordinal) != true)
+        // Every visual turn inside the already-translated first Core page settles instantly on Content; the
+        // one turn that crosses into the untranslated second Core page flips to Loading while the slow model
+        // runs. Page forward until we catch that crossing turn mid-flight.
+        Task? crossing = null;
+        var guard = 0;
+        while (vm.CanGoNext && guard++ < 500)
         {
-            await Task.Delay(10);
+            var turn = vm.NextPageAsync();
+            var deadline = DateTime.UtcNow.AddMilliseconds(500);
+            while (DateTime.UtcNow < deadline && vm.State == ReaderState.Content && !turn.IsCompleted)
+            {
+                await Task.Delay(5);
+            }
+
+            if (vm.State == ReaderState.Loading)
+            {
+                crossing = turn;
+                break;
+            }
+
+            await turn;
         }
 
-        // Mid-translation the reader must show page 2's own source text, not a blank pane and not
-        // page 1's translation.
+        // Mid-translation the reader must show the new page's own source text, not a blank pane and not
+        // the previous page's translation.
+        Assert.NotNull(crossing);
         Assert.Equal(ReaderState.Loading, vm.State);
+        Assert.Contains("Second", vm.OriginalText!, StringComparison.Ordinal);
         Assert.Contains("Second", vm.DisplayText!, StringComparison.Ordinal);
         Assert.True(vm.IsContentVisible);
         Assert.True(vm.IsTranslatingFallbackVisible);
         Assert.False(vm.IsStatusVisible);
 
-        await turning;
+        await crossing!;
         Assert.Contains("Second", vm.TranslationText!, StringComparison.Ordinal);
         Assert.False(vm.IsTranslatingFallbackVisible);
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Translation_arriving_from_prefetch_for_the_current_page_is_shown()
     {
         // A page whose segments are already in the store must render from the store, with no model call.
@@ -260,17 +315,18 @@ public sealed class ReaderViewModelTests : IDisposable
             new NoOpPrefetchCoordinator(),
             new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
 
-        var path = CreatePdf("Bonjour", "Bonsoir");
-        _ = vm.OpenAsync(path); // page 1 starts translating (slowly)
+        var path = CreatePdf("Bonjour", Long("Bonsoir"));
+        _ = vm.OpenAsync(path); // the first Core page starts translating (slowly)
         var deadline = DateTime.UtcNow.AddSeconds(2);
         while (DateTime.UtcNow < deadline && vm.OriginalText is null)
         {
             await Task.Delay(10);
         }
 
-        Assert.Equal(ReaderState.Loading, vm.State); // the slow model is still working on page 1
+        Assert.Equal(ReaderState.Loading, vm.State); // the slow model is still working on the first page
+        SetMetrics(vm);
 
-        // A previous session had already translated page 2's segments.
+        // A previous session had already translated the second Core page's segments.
         var reader = registry.ResolveFor(path);
         var doc = await reader.OpenAsync(path, TestContext.Current.CancellationToken);
         var page1 = await reader.GetPageAsync(doc, 1, TestContext.Current.CancellationToken);
@@ -282,11 +338,15 @@ public sealed class ReaderViewModelTests : IDisposable
                 TestContext.Current.CancellationToken);
         }
 
-        // Turning to it renders from the store immediately — the 30s model call is never made.
-        await vm.NextPageAsync();
+        // Paging into it renders from the store immediately — the 30s model call is never made.
+        var guard = 0;
+        while (vm.CanGoNext && vm.TranslationText != "PREFETCHED" && guard++ < 1000)
+        {
+            await vm.NextPageAsync();
+        }
 
         Assert.Equal("PREFETCHED", vm.TranslationText);
-        Assert.Contains("PREFETCHED", vm.DisplayText!, StringComparison.Ordinal); // page 2's segment, folded into the flow
+        Assert.Contains("PREFETCHED", vm.DisplayText!, StringComparison.Ordinal); // the second page's segment, folded into the flow
         Assert.Equal(ReaderState.Content, vm.State);
     }
 
@@ -313,7 +373,7 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.Contains("First", vm.TranslationText!, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Next_page_stays_clickable_while_the_current_page_is_still_translating()
     {
         var slow = new FakeChatClient(delay: TimeSpan.FromSeconds(2));
@@ -325,9 +385,10 @@ public sealed class ReaderViewModelTests : IDisposable
             new NoOpPrefetchCoordinator(),
             new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
 
-        await vm.OpenAsync(CreatePdf("One", "Two", "Three"));
+        await vm.OpenAsync(CreatePdf("One", Long("Two"), Long("Three")));
+        SetMetrics(vm);
 
-        vm.NextPageCommand.Execute(null); // the toolbar button's path — page 2 translates slowly
+        vm.NextPageCommand.Execute(null); // the toolbar button's path — crosses into a slowly-translating page
         var deadline = DateTime.UtcNow.AddSeconds(1);
         while (DateTime.UtcNow < deadline && vm.State != ReaderState.Loading)
         {
@@ -355,7 +416,7 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.False(string.IsNullOrWhiteSpace(vm.StatusMessage));
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Initialize_auto_opens_the_last_opened_document()
     {
         var path = CreatePdf("Autoload page");
@@ -364,63 +425,70 @@ public sealed class ReaderViewModelTests : IDisposable
 
         var reopened = CreateViewModel();
         await reopened.InitializeAsync();
+        SetMetrics(reopened);
 
         Assert.Equal(ReaderState.Content, reopened.State);
         Assert.Equal(Path.GetFileNameWithoutExtension(path), reopened.Title);
         Assert.Equal(1, reopened.PageNumber);
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Initialize_restores_last_read_page_of_last_opened_document()
     {
-        var path = CreatePdf("p1", "p2", "p3");
+        // Distinct, long Core pages so the reader can page well into the third one.
+        var path = CreatePdf(Long("Alpha"), Long("Beta"), Long("Gamma"));
         var first = CreateViewModel();
         await first.OpenAsync(path);
-        await first.NextPageAsync();
-        await first.NextPageAsync();
-        Assert.Equal(3, first.PageNumber);
+        SetMetrics(first);
+        await PageForwardUntilVisibleAsync(first, "Gamma");
+        Assert.Contains("Gamma", first.VisiblePageText!, StringComparison.Ordinal);
 
         var reopened = CreateViewModel();
         await reopened.InitializeAsync();
+        SetMetrics(reopened);
 
         Assert.Equal(ReaderState.Content, reopened.State);
         Assert.Equal(Path.GetFileNameWithoutExtension(path), reopened.Title);
-        Assert.Equal(3, reopened.PageNumber);
+        Assert.Contains("Gamma", reopened.VisiblePageText!, StringComparison.Ordinal); // resumed in the third Core page
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Manually_reopening_a_book_resumes_where_it_was_left_off()
     {
-        var path = CreatePdf("p1", "p2", "p3");
+        var path = CreatePdf(Long("Alpha"), Long("Beta"), Long("Gamma"));
         var first = CreateViewModel();
         await first.OpenAsync(path);
-        await first.NextPageAsync();
-        await first.NextPageAsync();
-        Assert.Equal(3, first.PageNumber);
+        SetMetrics(first);
+        await PageForwardUntilVisibleAsync(first, "Gamma");
 
         var reopenedManually = CreateViewModel();
         await reopenedManually.OpenAsync(path);
+        SetMetrics(reopenedManually);
 
-        Assert.Equal(3, reopenedManually.PageNumber); // resumed at the last read page, not page 1
+        // Resumed in the third Core page, not back at the start.
+        Assert.Contains("Gamma", reopenedManually.VisiblePageText!, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Each_book_keeps_its_own_reading_position()
     {
-        var bookA = CreatePdf("a1", "a2", "a3", "a4");
-        var bookB = CreatePdf("b1", "b2", "b3");
+        var bookA = CreatePdf(Long("Aleph"), Long("Bet"), Long("Gimel"));
+        var bookB = CreatePdf(Long("Uno"), Long("Dos"));
         var vm = CreateViewModel();
 
         await vm.OpenAsync(bookA);
-        await vm.NextPageAsync();
-        await vm.NextPageAsync();
-        Assert.Equal(3, vm.PageNumber); // book A on page 3
+        SetMetrics(vm);
+        await PageForwardUntilVisibleAsync(vm, "Gimel");
+        Assert.Contains("Gimel", vm.VisiblePageText!, StringComparison.Ordinal); // book A deep in its third page
 
-        await vm.OpenAsync(bookB); // a book never opened before starts at page 1
+        await vm.OpenAsync(bookB); // a book never opened before starts at the beginning
+        SetMetrics(vm);
         Assert.Equal(1, vm.PageNumber);
+        Assert.Contains("Uno", vm.VisiblePageText!, StringComparison.Ordinal);
 
-        await vm.OpenAsync(bookA); // back to A, still on its own page 3
-        Assert.Equal(3, vm.PageNumber);
+        await vm.OpenAsync(bookA); // back to A, still where it was left
+        SetMetrics(vm);
+        Assert.Contains("Gimel", vm.VisiblePageText!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -458,10 +526,10 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.Equal(100d, vm.TranslationProgressPercent);
     }
 
-    [Fact]
+    [AvaloniaFact]
     public async Task Background_prefetched_translations_are_persisted_and_reused_after_reopen()
     {
-        var path = CreatePdf("one", "two", "three");
+        var path = CreatePdf(Long("one"), Long("two"), Long("three"));
         var prefs = new JsonPreferencesStore(Path.Combine(_dir, "persist-prefetch-prefs.json"));
         var registry = new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader(), new EpubDocumentReader() });
         var translationsDir = Path.Combine(_dir, "translations");
@@ -481,9 +549,10 @@ public sealed class ReaderViewModelTests : IDisposable
         var translation2 = new TranslationService(new StubChatClientFactory(_fake), store2);
         var second = new ReaderViewModel(registry, translation2, store2, new NoOpPrefetchCoordinator(), prefs);
         await second.OpenAsync(path);
-        await second.NextPageAsync();
+        SetMetrics(second);
+        await PageForwardUntilVisibleAsync(second, "two"); // page across into the second Core page
 
-        Assert.Equal(callsAfterPrefetch, _fake.CallCount); // nothing re-translated
+        Assert.Equal(callsAfterPrefetch, _fake.CallCount); // nothing re-translated — all served from disk
         Assert.Contains("two", second.TranslationText!, StringComparison.OrdinalIgnoreCase);
     }
 

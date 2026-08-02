@@ -90,7 +90,7 @@ public class ViewSmokeTests
     }
 
     [AvaloniaFact]
-    public void A_short_page_is_vertically_centred_in_the_reading_window()
+    public void The_reading_pane_clips_one_top_aligned_visual_page_with_no_scrollbar()
     {
         var store = new InMemoryTranslationStore();
         var vm = new ReaderViewModel(
@@ -100,7 +100,7 @@ public class ViewSmokeTests
             new NoOpPrefetchCoordinator(),
             new JsonPreferencesStore(Path.Combine(Path.GetTempPath(), $"{System.Guid.NewGuid():n}.json")));
         vm.ShowingTranslation = false;
-        vm.OriginalText = "A short closing line at the end of a chapter.";
+        vm.VisiblePageText = "A single viewport-sized visual page.";
         vm.State = ReaderState.Content;
 
         var view = new ReaderView { DataContext = vm };
@@ -108,17 +108,18 @@ public class ViewSmokeTests
         window.Show();
         Dispatcher.UIThread.RunJobs();
 
-        var scroll = view.FindControl<ScrollViewer>("ReadingScroll")!;
-        var text = view.FindControl<SelectableTextBlock>("PageText")!;
+        // Page-by-page reading replaced the scroller with a clipped panel that shows one visual page.
+        Assert.Null(view.FindControl<ScrollViewer>("ReadingScroll"));
+        var surface = view.FindControl<Panel>("ReadingSurface")!;
+        Assert.True(surface.ClipToBounds);
 
-        // A short page must not scroll, and it should sit near the vertical middle rather than pinned to the
-        // top with a tall empty gap below it.
-        Assert.True(scroll.Extent.Height <= scroll.Viewport.Height + 1, "a short page must not scroll");
-        var textCenterY = text.TranslatePoint(new Point(0, text.Bounds.Height / 2), scroll)!.Value.Y;
-        var viewportCenterY = scroll.Viewport.Height / 2;
-        Assert.True(
-            Math.Abs(textCenterY - viewportCenterY) < 90,
-            $"short page should be vertically centred: text centre {textCenterY}, viewport centre {viewportCenterY}");
+        var text = view.FindControl<SelectableTextBlock>("PageText")!;
+        Assert.Equal(Avalonia.Layout.VerticalAlignment.Top, text.VerticalAlignment);
+        Assert.Equal("A single viewport-sized visual page.", text.Text); // bound to VisiblePageText
+
+        // The page sits at the top inset, not centred in the window.
+        var textTop = text.TranslatePoint(new Point(0, 0), surface)!.Value.Y;
+        Assert.True(textTop < surface.Bounds.Height / 2, $"page must sit near the top, not centred (top={textTop})");
     }
 
     private sealed class EmptyOllamaCatalog : IOllamaModelCatalog

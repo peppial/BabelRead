@@ -24,14 +24,15 @@ public sealed class ReaderViewKeyboardTests : IDisposable
     public async Task Right_arrow_goes_to_the_next_page_and_left_arrow_goes_back()
     {
         var (window, vm) = await OpenReaderAsync("First page text", "Second page text");
+        var firstPage = vm.VisiblePageText;
 
         window.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.None);
         await WaitForPageAsync(vm, 2);
-        Assert.Contains("Second", vm.OriginalText!, StringComparison.Ordinal);
+        Assert.NotEqual(firstPage, vm.VisiblePageText); // a different slice of the flow is on screen
 
         window.KeyPressQwerty(PhysicalKey.ArrowLeft, RawInputModifiers.None);
         await WaitForPageAsync(vm, 1);
-        Assert.Contains("First", vm.OriginalText!, StringComparison.Ordinal);
+        Assert.Equal(firstPage, vm.VisiblePageText); // back to exactly the opening page
     }
 
     [AvaloniaFact]
@@ -51,14 +52,22 @@ public sealed class ReaderViewKeyboardTests : IDisposable
     {
         var (window, vm) = await OpenReaderAsync("First page text", "Second page text");
 
+        // Left at the very first visual page does nothing.
+        Assert.False(vm.CanGoPrevious);
         window.KeyPressQwerty(PhysicalKey.ArrowLeft, RawInputModifiers.None);
         await WaitForPageAsync(vm, 1);
 
+        // Right advances one visual page.
         window.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.None);
         await WaitForPageAsync(vm, 2);
 
+        // At the very last visual page, Right does nothing.
+        await vm.JumpToPageAsync(vm.PageCount);
+        var last = vm.PageCount;
+        await WaitForPageAsync(vm, last);
+        Assert.False(vm.CanGoNext);
         window.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.None);
-        await WaitForPageAsync(vm, 2);
+        await WaitForPageAsync(vm, last);
     }
 
     [AvaloniaFact]
@@ -99,44 +108,22 @@ public sealed class ReaderViewKeyboardTests : IDisposable
     }
 
     [AvaloniaFact]
-    public async Task An_overflowing_page_can_be_scrolled_all_the_way_to_its_last_line()
+    public async Task An_overflowing_page_is_clipped_to_the_viewport_with_no_scrollbar()
     {
-        // A page far taller than a short window: the bottom must be reachable, not stuck under an inset.
-        var lines = Enumerable.Range(0, 50)
-            .Select(i => ($"Line {i} with several words that make the page tall enough to overflow.", 60.0, 800.0 - (i * 15)));
-        var path = SampleDocuments.CreatePdfWithLines(Path.Combine(_dir, "tall.pdf"), lines);
-
-        var store = new InMemoryTranslationStore();
-        var vm = new ReaderViewModel(
-            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
-            new TranslationService(new StubChatClientFactory(new FakeChatClient()), store),
-            store,
-            new NoOpPrefetchCoordinator(),
-            new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
-
-        var window = new Window { Content = new ReaderView { DataContext = vm }, Width = 500, Height = 300 };
-        window.Show();
-        await vm.OpenAsync(path);
-
+        // Page-by-page reading replaced scrolling: a Core page longer than the window is cut into several
+        // viewport-sized visual pages, and the reading surface is a clipped Panel — there is no ScrollViewer.
+        var (window, vm) = await OpenReaderAsync("First page text", "Second page text");
         var view = (ReaderView)window.Content!;
-        var scroll = view.FindControl<ScrollViewer>("ReadingScroll")!;
-        var text = view.FindControl<SelectableTextBlock>("PageText")!;
-        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
 
-        Assert.Equal(default, scroll.Padding); // the inset lives on the text margin, not here
+        Assert.Null(view.FindControl<ScrollViewer>("ReadingScroll")); // the scroller is gone
+        var surface = view.FindControl<Panel>("ReadingSurface")!;
+        Assert.True(surface.ClipToBounds);
 
-        // The extent must include the whole text plus its full 24px top+bottom inset. The bug left the
-        // bottom inset out of the extent, stranding the last line under it.
+        // A padded page spans many visual pages, so the on-screen slice is a strict prefix of the whole flow.
+        Assert.True(vm.PageCount > 1, "a long page must be cut into several visual pages");
         Assert.True(
-            scroll.Extent.Height >= text.Bounds.Height + 48,
-            $"extent {scroll.Extent.Height} must cover the text {text.Bounds.Height} and its 48px inset");
-
-        // And the ScrollViewer lets you scroll to that true bottom, not a short one.
-        scroll.Offset = scroll.Offset.WithY(scroll.Extent.Height);
-        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
-        Assert.True(
-            Math.Abs(scroll.Offset.Y - (scroll.Extent.Height - scroll.Viewport.Height)) < 1,
-            "must scroll to the full bottom of the content");
+            vm.VisiblePageText!.Length < vm.DisplayText!.Length,
+            "one visual page must show less than the whole document flow");
     }
 
     private async Task<(Window Window, ReaderViewModel ViewModel)> OpenReaderAsync(params string[] pages)
@@ -149,12 +136,26 @@ public sealed class ReaderViewKeyboardTests : IDisposable
             new NoOpPrefetchCoordinator(),
             new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
 
-        var window = new Window { Content = new ReaderView { DataContext = vm } };
+        var window = new Window { Content = new ReaderView { DataContext = vm }, Width = 800, Height = 600 };
         window.Show();
 
         await vm.OpenAsync(SampleDocuments.CreatePdf(Path.Combine(_dir, $"{Guid.NewGuid():n}.pdf"), pages));
+
+        // The view pushes reading metrics on a debounced reflow after layout; until they land the document
+        // has no visual pages. Wait for the first page to be counted before driving keys.
+        await WaitForPaginationAsync(vm);
         Assert.Equal(1, vm.PageNumber);
         return (window, vm);
+    }
+
+    /// <summary>Wait until the view has reported its size and the document has been sliced into visual pages.</summary>
+    private static async Task WaitForPaginationAsync(ReaderViewModel vm)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline && (vm.PageNumber < 1 || vm.State == ReaderState.Loading))
+        {
+            await Task.Delay(20);
+        }
     }
 
     /// <summary>The key handler is async void, so wait for the navigation it kicked off to settle.</summary>
