@@ -438,6 +438,58 @@ public sealed class ReaderViewModelTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task Failed_translation_shows_the_original_text_without_blocking()
+    {
+        var failing = new FakeChatClient(throwOnCall: new System.Net.Http.HttpRequestException("network down"));
+        var store = new InMemoryTranslationStore();
+        var vm = new ReaderViewModel(
+            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
+            new TranslationService(new StubChatClientFactory(failing), store),
+            store,
+            new NoOpPrefetchCoordinator(),
+            new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
+
+        await vm.OpenAsync(CreatePdf(Long("Bonjour")));
+        SetMetrics(vm);
+
+        // The page stays readable in its original text — no blocking error screen.
+        Assert.Equal(ReaderState.Content, vm.State);
+        Assert.True(vm.TranslationFailed);
+        Assert.True(vm.IsTranslationFailedVisible);
+        Assert.True(vm.IsContentVisible);
+        Assert.False(vm.IsStatusVisible);
+        Assert.Contains("Bonjour", vm.VisiblePageText!, StringComparison.Ordinal);
+    }
+
+    [AvaloniaFact]
+    public async Task Retrying_after_a_failure_translates_the_page()
+    {
+        var calls = 0;
+        var flaky = new FakeChatClient(transform: s =>
+            System.Threading.Interlocked.Increment(ref calls) == 1
+                ? throw new System.Net.Http.HttpRequestException("flaky network")
+                : "[translated] " + s);
+        var store = new InMemoryTranslationStore();
+        var vm = new ReaderViewModel(
+            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
+            new TranslationService(new StubChatClientFactory(flaky), store),
+            store,
+            new NoOpPrefetchCoordinator(),
+            new JsonPreferencesStore(Path.Combine(_dir, "prefs.json")));
+
+        await vm.OpenAsync(CreatePdf(Long("Bonjour")));
+        SetMetrics(vm);
+        Assert.True(vm.TranslationFailed); // the first attempt failed
+
+        await vm.RetryAsync();
+
+        Assert.False(vm.TranslationFailed);
+        Assert.False(vm.IsTranslationFailedVisible);
+        Assert.Equal(ReaderState.Content, vm.State);
+        Assert.Contains("[translated]", vm.TranslationText!, StringComparison.Ordinal);
+    }
+
+    [AvaloniaFact]
     public async Task Initialize_auto_opens_the_last_opened_document()
     {
         var path = CreatePdf("Autoload page");

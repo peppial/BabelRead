@@ -87,6 +87,7 @@ public sealed partial class ReaderViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsContentVisible))]
     [NotifyPropertyChangedFor(nameof(IsStatusVisible))]
     [NotifyPropertyChangedFor(nameof(IsTranslatingFallbackVisible))]
+    [NotifyPropertyChangedFor(nameof(IsTranslationFailedVisible))]
     private bool _showingTranslation = true;
 
     [ObservableProperty]
@@ -94,10 +95,16 @@ public sealed partial class ReaderViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsStatusVisible))]
     [NotifyPropertyChangedFor(nameof(ShowRetry))]
     [NotifyPropertyChangedFor(nameof(IsTranslatingFallbackVisible))]
+    [NotifyPropertyChangedFor(nameof(IsTranslationFailedVisible))]
     private ReaderState _state = ReaderState.NoDocument;
 
     [ObservableProperty]
     private string? _statusMessage = "Open a PDF or EPUB to begin.";
+
+    /// <summary>The current page's translation failed; the reader falls back to the original text.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsTranslationFailedVisible))]
+    private bool _translationFailed;
 
     [ObservableProperty]
     private bool _canGoNext;
@@ -180,6 +187,11 @@ public sealed partial class ReaderViewModel : ObservableObject
         && ShowingTranslation
         && !string.IsNullOrWhiteSpace(OriginalText)
         && string.IsNullOrWhiteSpace(TranslationText);
+
+    /// <summary>Translation of the current page failed: the reader keeps reading the original text while a
+    /// small notice offers a retry, rather than being blocked by a full error screen.</summary>
+    public bool IsTranslationFailedVisible =>
+        TranslationFailed && ShowingTranslation && State == ReaderState.Content;
 
     public string CurrentPageLabel => $"Page {PageNumber}/{PageCount}";
 
@@ -494,8 +506,18 @@ public sealed partial class ReaderViewModel : ObservableObject
     }
 
     [RelayCommand]
-    public Task RetryAsync() =>
-        _document is null ? Task.CompletedTask : TranslateVisiblePageAsync(ReadingDirection.Forward);
+    public Task RetryAsync()
+    {
+        if (_document is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        // A failed page stays in Content state (showing the original), which the fast-path would treat as
+        // "already on screen"; force past it so retry actually re-runs the translation.
+        _currentIndex = -1;
+        return TranslateVisiblePageAsync(ReadingDirection.Forward);
+    }
 
     /// <summary>After the visual page moves: re-slice the text on screen, renumber, refresh nav, and
     /// translate/prefetch the Core page the new visual page lands on.</summary>
@@ -542,6 +564,7 @@ public sealed partial class ReaderViewModel : ObservableObject
         }
 
         _currentIndex = coreIndex;
+        TranslationFailed = false; // a fresh page attempt clears any prior page's failure notice
 
         _pageCts?.Cancel();
         _pageCts?.Dispose();
@@ -642,9 +665,13 @@ public sealed partial class ReaderViewModel : ObservableObject
         }
         else
         {
+            // A failed translation must not blank the page or block reading: keep the reader in the original
+            // text (the continuous flow already renders it for this still-untranslated page) and raise a
+            // small non-blocking notice that offers a retry.
             TranslationText = null;
-            State = ReaderState.Error;
-            StatusMessage = result.FailureReason ?? "Translation failed. Try again.";
+            TranslationFailed = true;
+            State = ReaderState.Content;
+            StatusMessage = null;
         }
     }
 

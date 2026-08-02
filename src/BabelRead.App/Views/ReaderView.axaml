@@ -55,6 +55,20 @@
       <TextBlock Text="Translating…" Opacity="0.75" FontWeight="SemiBold" />
     </Border>
 
+    <!-- Translation failed: keep reading the original text, offer a retry, don't block the page. -->
+    <Border IsVisible="{Binding IsTranslationFailedVisible}"
+            HorizontalAlignment="Center" VerticalAlignment="Top"
+            Margin="0,84,0,0" Padding="12,5"
+            Background="{DynamicResource SystemControlBackgroundAltHighBrush}"
+            CornerRadius="12" BoxShadow="0 2 10 0 #22000000">
+      <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+        <TextBlock Text="Translation failed — showing original" Opacity="0.75" FontWeight="SemiBold"
+                   VerticalAlignment="Center" />
+        <Button Classes="tool" Content="Retry" Command="{Binding RetryCommand}"
+                Padding="8,2" AutomationProperties.Name="Retry translation" />
+      </StackPanel>
+    </Border>
+
     <!-- Floating toolbar. Fades away while reading; the code-behind shows it on pointer movement. -->
     <Border Name="Toolbar" VerticalAlignment="Top" Margin="12,12,12,0"
             Background="{DynamicResource SystemControlBackgroundAltHighBrush}"
