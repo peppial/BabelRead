@@ -750,6 +750,12 @@ public sealed partial class ReaderViewModel : ObservableObject
             return;
         }
 
+        // Snapshot the current flow so the reading position survives the rebuild: the same char offset lands
+        // in a different passage once paragraphs change length (translation⇄original, or a landing
+        // translation), so anchor every offset to its paragraph and how far into it, then remap below.
+        var oldOffsets = _segmentCharOffsets;
+        var oldFlowLength = DisplayText?.Length ?? 0;
+
         var source = ResolvedSource;
         var offsets = new int[_orderedSegments.Count];
         var builder = new System.Text.StringBuilder();
@@ -774,9 +780,59 @@ public sealed partial class ReaderViewModel : ObservableObject
             }
         }
 
+        var newFlowLength = builder.Length;
         _segmentCharOffsets = offsets;
         DisplayText = builder.ToString();
+
+        // Carry the page start (and the back-stack) from the old flow to the new one, paragraph by
+        // paragraph, so toggling original⇄translation or a landing translation keeps the reader on the same
+        // passage rather than jumping. (The paragraph count is fixed for a document, so old and new offsets
+        // line up index-for-index.)
+        if (oldOffsets.Length == offsets.Length && oldOffsets.Length > 0)
+        {
+            _pageStartOffset = RemapOffset(_pageStartOffset, oldOffsets, oldFlowLength, offsets, newFlowLength);
+            if (_visitedPageStarts.Count > 0)
+            {
+                var remapped = _visitedPageStarts
+                    .Select(o => RemapOffset(o, oldOffsets, oldFlowLength, offsets, newFlowLength))
+                    .ToArray();
+                _visitedPageStarts.Clear();
+                for (var i = remapped.Length - 1; i >= 0; i--) // rebuild top-of-stack last to keep order
+                {
+                    _visitedPageStarts.Push(remapped[i]);
+                }
+            }
+        }
+
         ReSlice();
+    }
+
+    /// <summary>Maps a char offset from one flow to another by anchoring it to its paragraph and the fraction
+    /// of the way through it, so a page start stays on the same passage when paragraphs change length.</summary>
+    private static int RemapOffset(int offset, int[] oldOffsets, int oldFlowLength, int[] newOffsets, int newFlowLength)
+    {
+        var segment = SegmentIndexIn(oldOffsets, offset);
+        var oldStart = oldOffsets[segment];
+        var oldSpan = (segment + 1 < oldOffsets.Length ? oldOffsets[segment + 1] : oldFlowLength) - oldStart;
+        var newStart = newOffsets[segment];
+        var newSpan = (segment + 1 < newOffsets.Length ? newOffsets[segment + 1] : newFlowLength) - newStart;
+
+        var into = offset - oldStart;
+        var mapped = oldSpan > 0 ? (int)Math.Round((double)into / oldSpan * newSpan) : 0;
+        return newStart + Math.Clamp(mapped, 0, Math.Max(0, newSpan));
+    }
+
+    /// <summary>The index of the paragraph whose span contains <paramref name="charOffset"/>, in the given
+    /// paragraph-start table (half-open intervals).</summary>
+    private static int SegmentIndexIn(int[] offsets, int charOffset)
+    {
+        if (offsets.Length == 0)
+        {
+            return 0;
+        }
+
+        var i = Array.BinarySearch(offsets, charOffset);
+        return i >= 0 ? i : Math.Clamp(~i - 1, 0, offsets.Length - 1);
     }
 
     /// <summary>Char offset in <see cref="DisplayText"/> where a Core page begins.</summary>
@@ -791,21 +847,7 @@ public sealed partial class ReaderViewModel : ObservableObject
         return _segmentCharOffsets[Math.Clamp(segment, 0, _segmentCharOffsets.Length - 1)];
     }
 
-    private int SegmentIndexAtOffset(int charOffset)
-    {
-        if (_segmentCharOffsets.Length == 0)
-        {
-            return 0;
-        }
-
-        var i = Array.BinarySearch(_segmentCharOffsets, charOffset);
-        if (i >= 0)
-        {
-            return i;
-        }
-
-        return Math.Clamp(~i - 1, 0, _segmentCharOffsets.Length - 1);
-    }
+    private int SegmentIndexAtOffset(int charOffset) => SegmentIndexIn(_segmentCharOffsets, charOffset);
 
     private int PageForSegment(int segmentIndex)
     {
@@ -826,7 +868,14 @@ public sealed partial class ReaderViewModel : ObservableObject
         return page;
     }
 
-    partial void OnShowingTranslationChanged(bool value) => BuildContinuousText();
+    partial void OnShowingTranslationChanged(bool value)
+    {
+        // Original and translation paginate differently (translated paragraphs are usually longer), so after
+        // remapping the reader onto the same passage, refresh the visual page count and nav for the new flow.
+        BuildContinuousText();
+        RecountVisualPages();
+        UpdateNavigation();
+    }
 
     /// <summary>
     /// A segment was translated — possibly by the background prefetch, on its own thread. Refresh

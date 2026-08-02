@@ -162,6 +162,27 @@ public sealed class ReaderViewModelTests : IDisposable
         Assert.NotEqual(before, vm.ShowingTranslation);
     }
 
+    [AvaloniaFact]
+    public async Task Toggling_to_the_original_keeps_the_reader_on_the_same_passage()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(CreatePdf(Long("Alpha"), Long("Beta"), Long("Gamma")));
+        SetMetrics(vm);
+        Assert.True(vm.ShowingTranslation); // translation is the default view
+
+        // Read into the middle paragraph; its Core page is translated on the way.
+        await PageForwardUntilVisibleAsync(vm, "Beta");
+        Assert.Contains("Beta", vm.VisiblePageText!, StringComparison.Ordinal);
+
+        vm.ToggleView(); // show the original
+
+        Assert.False(vm.ShowingTranslation);
+        // The original must show the same passage — the original of the paragraph being read — not the same
+        // numeric offset into the now-shorter original flow, which would land somewhere else entirely.
+        Assert.Contains("Beta", vm.VisiblePageText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Gamma", vm.VisiblePageText!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Text_less_page_shows_the_no_text_state()
     {
