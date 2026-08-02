@@ -228,7 +228,14 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
             return string.Empty;
         }
 
-        var noScripts = ScriptStyleRegex().Replace(html, " ");
+        return NormalizeHtml(html);
+    }
+
+    /// <summary>Shared normalization pipeline used by <see cref="HtmlToText"/> and, with sentinel scalars
+    /// spliced into the input, by <see cref="EpubLinkExtractor"/> to recover link/anchor positions.</summary>
+    internal static string NormalizeHtml(string marked)
+    {
+        var noScripts = ScriptStyleRegex().Replace(marked, " ");
         var withLineBreaks = BrTagRegex().Replace(noScripts, "\n");
         var withParagraphs = BlockTagRegex().Replace(withLineBreaks, "\n\n");
         var noTags = TagRegex().Replace(withParagraphs, " ");
