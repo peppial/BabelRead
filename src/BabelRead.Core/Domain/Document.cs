@@ -17,7 +17,9 @@ public sealed class Document
         DocumentFormat format,
         int pageCount,
         LanguageCode detectedSourceLanguage,
-        IReadOnlyList<string>? segments = null)
+        IReadOnlyList<string>? segments = null,
+        IReadOnlyList<DocumentLink>? links = null,
+        IReadOnlyDictionary<string, LinkTarget>? anchors = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentOutOfRangeException.ThrowIfNegative(pageCount);
@@ -28,6 +30,8 @@ public sealed class Document
         PageCount = pageCount;
         DetectedSourceLanguage = detectedSourceLanguage;
         Segments = segments ?? [];
+        Links = links ?? [];
+        Anchors = anchors ?? new Dictionary<string, LinkTarget>();
     }
 
     /// <summary>Stable identity for this source document (derived from path); part of translation-cache keys.</summary>
@@ -48,4 +52,12 @@ public sealed class Document
 
     /// <summary>Auto-detected source language; may be <see cref="LanguageCode.Unknown"/> until known.</summary>
     public LanguageCode DetectedSourceLanguage { get; }
+
+    /// <summary>Internal hyperlinks found in the document's text (EPUB only; empty for PDF). Each
+    /// entry's <see cref="DocumentLink.TargetKey"/> is guaranteed to exist in <see cref="Anchors"/>.</summary>
+    public IReadOnlyList<DocumentLink> Links { get; }
+
+    /// <summary>Resolvable link destinations, keyed by an internal anchor/file identity (EPUB only;
+    /// empty for PDF). Populated for every chapter, not only ones a link points at.</summary>
+    public IReadOnlyDictionary<string, LinkTarget> Anchors { get; }
 }

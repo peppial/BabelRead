@@ -131,6 +131,17 @@ public static class SampleDocuments
         return path;
     }
 
+    /// <summary>A 2-chapter book where chapter 0 links to an id anchor inside chapter 1
+    /// (<c>ch1.xhtml</c> — chapters are zero-based, see <see cref="CreateEpub"/>).</summary>
+    public static string CreateEpubWithInternalLink(string path) => CreateEpub(path, "Linked", "en",
+        "See <a href=\"ch1.xhtml#note\">the note</a>.",
+        "<p id=\"note\">The note body is here with enough words to form a segment.</p>");
+
+    /// <summary>A single-chapter book with one external link (dropped as out-of-document) and one
+    /// dangling internal link to a nonexistent anchor (dropped as unresolved).</summary>
+    public static string CreateEpubWithExternalAndDanglingLinks(string path) => CreateEpub(path, "Ext", "en",
+        "<a href=\"https://example.com\">out</a> and <a href=\"#missing\">nowhere</a>.");
+
     private static void WriteEntry(ZipArchive archive, string name, string content, CompressionLevel level = CompressionLevel.Optimal)
     {
         var entry = archive.CreateEntry(name, level);

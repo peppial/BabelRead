@@ -122,6 +122,43 @@ public sealed class EpubDocumentReaderTests : IDisposable
     }
 
     [Fact]
+    public async Task Internal_link_resolves_to_the_target_segment()
+    {
+        // SampleDocuments.CreateEpubWithInternalLink builds a 2-chapter book: ch0 links to an id in ch1.
+        var path = SampleDocuments.CreateEpubWithInternalLink(Path.Combine(_dir, "linked.epub"));
+        using var reader = new EpubDocumentReader();
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        var link = Assert.Single(doc.Links);
+        Assert.True(doc.Anchors.ContainsKey(link.TargetKey));
+        var target = doc.Anchors[link.TargetKey];
+        Assert.True(target.SegmentIndex > link.SegmentIndex); // points forward into chapter 2
+    }
+
+    [Fact]
+    public async Task External_and_dangling_links_are_dropped()
+    {
+        var path = SampleDocuments.CreateEpubWithExternalAndDanglingLinks(Path.Combine(_dir, "ext.epub"));
+        using var reader = new EpubDocumentReader();
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        Assert.Empty(doc.Links); // http link + link to a missing id both dropped
+    }
+
+    [Fact]
+    public async Task Segment_text_is_unchanged_by_link_extraction()
+    {
+        // A plain book with no links must produce exactly the same segments as before.
+        var path = SampleDocuments.CreateEpub(Path.Combine(_dir, "plain.epub"), "Book", "en",
+            "<p>Chapter one paragraph.</p>", "<p>Chapter two paragraph.</p>");
+        using var reader = new EpubDocumentReader();
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        Assert.Contains(doc.Segments, s => s.Contains("Chapter one", StringComparison.Ordinal));
+        Assert.Empty(doc.Links);
+    }
+
+    [Fact]
     public async Task Opening_a_non_epub_throws_DocumentOpenException()
     {
         var bogus = Path.Combine(_dir, "bad.epub");
