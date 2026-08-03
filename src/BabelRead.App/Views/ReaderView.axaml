@@ -96,9 +96,11 @@
         </StackPanel>
 
         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-          <!-- Browser-style Back for a followed internal link; hidden until there is somewhere to return to. -->
-          <Button Classes="tool nav" Content="‹" Command="{Binding GoBackFromLinkCommand}"
-                  IsVisible="{Binding CanGoBackFromLink}" AutomationProperties.Name="Back" />
+          <!-- Browser-style Back for a followed internal link; hidden until there is somewhere to return to.
+               A distinct return glyph (not the page ‹) so it is not mistaken for Previous page. -->
+          <Button Classes="tool nav" Content="↩" Command="{Binding GoBackFromLinkCommand}"
+                  IsVisible="{Binding CanGoBackFromLink}" ToolTip.Tip="Back"
+                  AutomationProperties.Name="Back" />
           <Button Classes="tool nav" Content="‹" Command="{Binding PreviousPageCommand}"
                   IsEnabled="{Binding CanGoPrevious}" AutomationProperties.Name="Previous page" />
           <Button Classes="tool nav" Content="›" Command="{Binding NextPageCommand}"
