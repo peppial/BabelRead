@@ -1,5 +1,6 @@
 using BabelRead.Core.Documents;
 using BabelRead.TestSupport;
+using VersOne.Epub;
 using Xunit;
 
 namespace BabelRead.Core.Tests.Documents;
@@ -156,6 +157,55 @@ public sealed class EpubDocumentReaderTests : IDisposable
 
         Assert.Contains(doc.Segments, s => s.Contains("Chapter one", StringComparison.Ordinal));
         Assert.Empty(doc.Links);
+    }
+
+    [Fact]
+    public async Task Divergent_chapter_extraction_drops_its_links_and_anchors_but_keeps_clean_segment_text()
+    {
+        // ch0's body is an id-only <a> immediately followed by text at a block start: the sentinel the
+        // extractor splices in splits a whitespace run it can't rejoin, so its Text ends up with a spurious
+        // leading space HtmlToText never produces. Prove that divergence directly against the exact raw
+        // content the reader sees, before trusting any behavior downstream of the compare-and-drop guard.
+        var path = SampleDocuments.CreateEpubWithDivergentAnchor(Path.Combine(_dir, "divergent.epub"));
+        var book = await EpubReader.ReadBookAsync(path);
+        var chapter0Raw = book.ReadingOrder[0].Content;
+        var cleanChapter0Text = EpubDocumentReader.HtmlToText(chapter0Raw);
+        Assert.NotEqual(cleanChapter0Text, EpubLinkExtractor.Extract(chapter0Raw).Text);
+
+        using var reader = new EpubDocumentReader();
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        // (a) the divergent chapter contributes no anchors: its #note fragment must not resolve, so the
+        // ch1 link pointing at it is dropped as unresolved rather than corrupted.
+        Assert.DoesNotContain(doc.Anchors.Keys, k => k.EndsWith("#note", StringComparison.Ordinal));
+        Assert.Empty(doc.Links);
+
+        // (b) the chapter's segment text is still exactly HtmlToText's clean output: uncorrupted, no
+        // spurious leading space leaked in from the dropped extraction.
+        Assert.Contains(doc.Segments, s => s == cleanChapter0Text);
+        Assert.DoesNotContain(doc.Segments, s => s.StartsWith(' '));
+    }
+
+    [Fact]
+    public async Task Link_to_a_trailing_empty_anchor_resolves_via_the_offset_gap_clamp()
+    {
+        // ch1 ends with a content-less <a id> anchor right after its only paragraph -- a common EPUB
+        // footnote/endnote marker. Its offset lands past the end of every tracked segment range (the
+        // whitespace trimmed away between the paragraph and the chapter's end), so resolving it exercises
+        // MapOffsetToSegment's edge clamp rather than a plain in-range lookup.
+        var path = SampleDocuments.CreateEpubWithTrailingAnchor(Path.Combine(_dir, "trailing.epub"));
+        using var reader = new EpubDocumentReader();
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        var link = Assert.Single(doc.Links);
+        Assert.True(doc.Anchors.ContainsKey(link.TargetKey));
+        var target = doc.Anchors[link.TargetKey];
+
+        // Resolves to chapter 1's segment, at a valid position within (or right at the end of) its text --
+        // not out of bounds, not silently dropped, not pointing at the wrong chapter.
+        var targetSegment = doc.Segments[target.SegmentIndex];
+        Assert.InRange(target.Offset, 0, targetSegment.Length);
+        Assert.True(target.SegmentIndex > link.SegmentIndex);
     }
 
     [Fact]

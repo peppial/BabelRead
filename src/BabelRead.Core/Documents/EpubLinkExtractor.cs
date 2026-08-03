@@ -31,7 +31,10 @@ public static partial class EpubLinkExtractor
         var marked = InsertSentinels(html, hrefs, ids);
 
         // 2. Normalize exactly as the reader does (sentinels are PUA scalars: untouched by every step).
-        var normalized = EpubDocumentReader.NormalizeHtml(marked);
+        // A sentinel at the very start/end of the chapter is non-whitespace, so it blocks NormalizeHtml's
+        // own trailing Trim() from removing the whitespace around it (whitespace HtmlToText would have
+        // dropped entirely). Repair that here so a lead/trail-only anchor still matches HtmlToText's text.
+        var normalized = TrimEdgeWhitespaceAroundSentinels(EpubDocumentReader.NormalizeHtml(marked));
 
         // 3. Strip sentinels, recording their offsets in the clean text; pair by appearance order.
         var text = new StringBuilder(normalized.Length);
@@ -69,6 +72,46 @@ public static partial class EpubLinkExtractor
 
         return new ExtractedChapter(text.ToString(), links, anchors);
     }
+
+    /// <summary>Removes whitespace that sits between a string edge and a sentinel, mirroring what
+    /// <c>string.Trim()</c> would have done had the (non-whitespace) sentinel not been there to block it.
+    /// Sentinels themselves are preserved, just moved to sit flush against the edge.</summary>
+    private static string TrimEdgeWhitespaceAroundSentinels(string s)
+    {
+        var start = 0;
+        var leadingSentinels = new StringBuilder();
+        while (start < s.Length && (char.IsWhiteSpace(s[start]) || IsSentinel(s[start])))
+        {
+            if (IsSentinel(s[start]))
+            {
+                leadingSentinels.Append(s[start]);
+            }
+
+            start++;
+        }
+
+        var end = s.Length - 1;
+        var trailingSentinels = new StringBuilder();
+        while (end >= start && (char.IsWhiteSpace(s[end]) || IsSentinel(s[end])))
+        {
+            if (IsSentinel(s[end]))
+            {
+                trailingSentinels.Insert(0, s[end]);
+            }
+
+            end--;
+        }
+
+        if (start == 0 && end == s.Length - 1)
+        {
+            return s; // no edge whitespace/sentinel mix to repair
+        }
+
+        var core = end >= start ? s[start..(end + 1)] : string.Empty;
+        return leadingSentinels + core + trailingSentinels.ToString();
+    }
+
+    private static bool IsSentinel(char c) => c is LinkOpen or LinkClose or AnchorMark;
 
     /// <summary>Splice sentinels into the raw HTML: <c>LinkClose</c> just before each <c>&lt;/a&gt;</c>;
     /// after every other tag, <c>AnchorMark</c> when it carries id/name (recording the id) and
