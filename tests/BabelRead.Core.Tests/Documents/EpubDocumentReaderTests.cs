@@ -218,6 +218,37 @@ public sealed class EpubDocumentReaderTests : IDisposable
         await Assert.ThrowsAsync<DocumentOpenException>(() => reader.OpenAsync(bogus, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Link_to_an_anchor_between_two_segments_resolves_via_the_offset_gap_ternary()
+    {
+        // ch1 holds two standalone paragraphs (each >= MinSegmentChars, so neither is coalesced) with the
+        // anchor sitting on the single-character gap trimmed away between them -- not past every range (the
+        // post-loop clamp covered by Link_to_a_trailing_empty_anchor_resolves_via_the_offset_gap_clamp above)
+        // but strictly between two tracked ranges. This exercises MapOffsetToSegment's mid-loop two-edge
+        // ternary specifically.
+        var path = SampleDocuments.CreateEpubWithAnchorBetweenTwoSegments(Path.Combine(_dir, "between.epub"));
+        using var reader = new EpubDocumentReader();
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        var link = Assert.Single(doc.Links);
+        Assert.True(doc.Anchors.ContainsKey(link.TargetKey));
+        var target = doc.Anchors[link.TargetKey];
+
+        // The target chapter contributes exactly two segments: the paragraph the anchor is nearer to
+        // (AlphaMarker), followed immediately by the other one (BetaMarker). Pinning both down (rather than
+        // just the one the anchor resolved to) is what proves there really are two ranges here, not one.
+        var firstSegment = doc.Segments[target.SegmentIndex];
+        var secondSegment = doc.Segments[target.SegmentIndex + 1];
+        Assert.Contains("AlphaMarker", firstSegment, StringComparison.Ordinal);
+        Assert.Contains("BetaMarker", secondSegment, StringComparison.Ordinal);
+
+        // The two-edge ternary resolves to the PREVIOUS segment at its end. The post-loop clamp this must
+        // be distinguished from would instead return the LAST segment (BetaMarker's) at ITS length -- so
+        // landing on the FIRST (AlphaMarker) segment, at its own end, is exactly what proves the mid-loop
+        // ternary fired rather than the unconditional clamp after the loop.
+        Assert.Equal(firstSegment.Length, target.Offset);
+    }
+
     public void Dispose()
     {
         try

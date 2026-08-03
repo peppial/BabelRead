@@ -166,6 +166,34 @@ public static class SampleDocuments
         "Second chapter paragraph with enough words of its own to form a proper standalone segment for this " +
         "particular test fixture to exercise reliably.<a id=\"mark\"></a>");
 
+    /// <summary>A 2-chapter book whose <c>ch1</c> holds exactly <em>two</em> tracked segment ranges (two
+    /// paragraphs each comfortably over <c>MinSegmentChars</c>, so neither is coalesced into the other) with
+    /// a self-closing, content-less <c>&lt;a id&gt;</c> anchor sitting on the single-character gap between
+    /// them (<c>"\n&lt;a id=\"mark\"/&gt;\n"</c>) rather than past every range. Resolving it exercises
+    /// <c>MapOffsetToSegment</c>'s mid-loop two-edge ternary -- distinct from <see cref="CreateEpubWithTrailingAnchor"/>'s
+    /// post-loop clamp -- and lands nearer the first paragraph's end. <c>ch0</c> links to it.
+    /// <para>Placing the anchor directly against a <c>&lt;p&gt;</c>/<c>&lt;p&gt;</c> block-tag boundary (or
+    /// as a paired <c>&lt;a id&gt;&lt;/a&gt;</c>) was tried first and always tripped the compare-and-drop
+    /// guard: <c>EpubLinkExtractor</c>'s sentinel characters sit between a stripped-tag's leftover space and
+    /// the adjacent newline on one side, blocking the same whitespace-collapse <c>HtmlToText</c> performs
+    /// unobstructed, so the two texts diverged by a stray space or an uncollapsed newline run every time. A
+    /// bare, self-closing anchor between two literal single newlines (no <c>&lt;p&gt;</c> tags at all inside
+    /// the chapter body) is the one arrangement found where the sentinel's neighboring leftover space is
+    /// consumed identically on both paths, so the extracted text matches exactly.</para></summary>
+    public static string CreateEpubWithAnchorBetweenTwoSegments(string path) => CreateEpub(path, "Between", "en",
+        "See <a href=\"ch1.xhtml#mark\">the mark</a> for more, and here is filler text padding this segment " +
+        "out to a reasonable length so it stands on its own as a proper paragraph in this test fixture.",
+        "AlphaMarker paragraph with enough words of its own to comfortably clear the four hundred character " +
+        "minimum segment threshold so that it forms a standalone segment without being merged into any " +
+        "neighboring block of text within this chapter, keeping the paragraph long enough on its own merits " +
+        "for this particular test fixture to behave reliably and deterministically every time the suite runs " +
+        "from now on.\n<a id=\"mark\"/>\n" +
+        "BetaMarker paragraph with enough words of its own to comfortably clear the four hundred character " +
+        "minimum segment threshold so that it, too, forms a standalone segment without being merged into any " +
+        "neighboring block of text within this chapter, keeping this second paragraph long enough on its own " +
+        "merits for this particular test fixture to behave reliably and deterministically every time the " +
+        "suite runs from now on as well.");
+
     private static void WriteEntry(ZipArchive archive, string name, string content, CompressionLevel level = CompressionLevel.Optimal)
     {
         var entry = archive.CreateEntry(name, level);
