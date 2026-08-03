@@ -50,6 +50,17 @@ public sealed class ReaderViewModelTests : IDisposable
         }
     }
 
+    /// <summary>Turn visual pages forward until a link is on screen (the tiny link fixture's default-sized
+    /// visual pages are small enough that the title segment alone fills page 1).</summary>
+    private static async Task PageForwardUntilLinkVisibleAsync(ReaderViewModel vm)
+    {
+        var guard = 0;
+        while (vm.VisibleLinks.Count == 0 && vm.CanGoNext && guard++ < 1000)
+        {
+            await vm.NextPageAsync();
+        }
+    }
+
     [AvaloniaFact]
     public async Task Opening_a_document_translates_the_first_page()
     {
@@ -627,6 +638,69 @@ public sealed class ReaderViewModelTests : IDisposable
 
         Assert.Equal(callsAfterPrefetch, _fake.CallCount); // nothing re-translated — all served from disk
         Assert.Contains("two", second.TranslationText!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [AvaloniaFact]
+    public async Task Following_an_internal_link_jumps_and_Back_returns_to_the_exact_spot()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithInternalLink(Path.Combine(_dir, "linked.epub")));
+        SetMetrics(vm);
+        vm.ShowingTranslation = false; // links live in the original view
+        await PageForwardUntilLinkVisibleAsync(vm); // page 1 alone is the chapter title; the link is further on
+
+        var before = vm.VisiblePageText;
+        var beforePageNumber = vm.PageNumber;
+        var link = Assert.Single(vm.VisibleLinks);
+
+        await vm.FollowLinkAsync(link.TargetKey);
+
+        // The anchor sits at the END of the target segment (it must, per the extractor's parity guard), so
+        // the landing page start is past "note body" — assert the jump mechanics instead of rendered text.
+        Assert.True(vm.CanGoBackFromLink);
+        Assert.NotEqual(before, vm.VisiblePageText);
+        Assert.NotEqual(beforePageNumber, vm.PageNumber);
+
+        await vm.GoBackFromLinkAsync();
+        Assert.False(vm.CanGoBackFromLink);
+        Assert.Equal(before, vm.VisiblePageText); // returned to the exact spot
+    }
+
+    [AvaloniaFact]
+    public async Task Back_from_a_link_survives_a_view_toggle_in_between()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithInternalLink(Path.Combine(_dir, "linked.epub")));
+        SetMetrics(vm);
+        vm.ShowingTranslation = false;
+        await PageForwardUntilLinkVisibleAsync(vm);
+
+        var before = vm.VisiblePageText;
+        var link = Assert.Single(vm.VisibleLinks);
+
+        await vm.FollowLinkAsync(link.TargetKey);
+        Assert.True(vm.CanGoBackFromLink);
+
+        vm.ToggleView(); // land on the translation, which rebuilds the flow and remaps the link-return stack
+        vm.ToggleView(); // back to original — same passage either way, since Back must restore it below
+
+        await vm.GoBackFromLinkAsync();
+        Assert.False(vm.CanGoBackFromLink);
+        Assert.Equal(before, vm.VisiblePageText);
+    }
+
+    [AvaloniaFact]
+    public async Task Links_are_not_exposed_while_reading_the_translation()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithInternalLink(Path.Combine(_dir, "linked.epub")));
+        SetMetrics(vm);
+
+        vm.ShowingTranslation = true;
+        Assert.Empty(vm.VisibleLinks);
+        vm.ShowingTranslation = false;
+        await PageForwardUntilLinkVisibleAsync(vm);
+        Assert.NotEmpty(vm.VisibleLinks);
     }
 
     [Fact]

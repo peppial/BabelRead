@@ -55,6 +55,12 @@ public sealed partial class ReaderViewModel : ObservableObject
     private int _pageStartOffset;
     private readonly Stack<int> _visitedPageStarts = new();  // page starts we can pop straight back to
 
+    // Internal hyperlinks (EPUB only; empty for PDF): followed in the original view, with a browser-style
+    // Back stack separate from ordinary page navigation.
+    private IReadOnlyList<DocumentLink> _links = [];
+    private IReadOnlyDictionary<string, LinkTarget> _anchors = new Dictionary<string, LinkTarget>();
+    private readonly Stack<int> _linkReturnStack = new();
+
     [ObservableProperty]
     private string _title = "BabelRead";
 
@@ -161,6 +167,18 @@ public sealed partial class ReaderViewModel : ObservableObject
     /// the current size and font. This is what the reading pane renders, not the whole flow.</summary>
     [ObservableProperty]
     private string? _visiblePageText;
+
+    /// <summary>Internal hyperlinks on the current visual page, slice-relative so the view can locate them
+    /// directly in <see cref="VisiblePageText"/>. Original view only (empty while showing a translation).</summary>
+    [ObservableProperty]
+    private IReadOnlyList<VisibleLink> _visibleLinks = [];
+
+    /// <summary>Whether <see cref="GoBackFromLinkAsync"/> has anywhere to return to.</summary>
+    [ObservableProperty]
+    private bool _canGoBackFromLink;
+
+    /// <summary>An internal hyperlink located within the current visual page, in page-relative coordinates.</summary>
+    public readonly record struct VisibleLink(int Start, int Length, string TargetKey);
 
     /// <summary>Right-to-left when showing a translation into an RTL language (Arabic, Hebrew, ...).</summary>
     public Avalonia.Media.FlowDirection ReadingFlowDirection =>
@@ -349,6 +367,10 @@ public sealed partial class ReaderViewModel : ObservableObject
             _document = await _reader.OpenAsync(path, CancellationToken.None).ConfigureAwait(true);
             Title = _document.Title;
             PageCount = _document.PageCount;
+            _links = _document.Links;
+            _anchors = _document.Anchors;
+            _linkReturnStack.Clear();
+            CanGoBackFromLink = false;
             await _store.OpenAsync(_document.Id).ConfigureAwait(true); // everything this book has ever had translated
             var prefs = await UpdatePreferencesAsync(p => p.LastOpenedDocumentPath = path).ConfigureAwait(true);
             _sourceOverride = LanguageResolver.GetOverride(prefs, _document.Id);
@@ -469,6 +491,95 @@ public sealed partial class ReaderViewModel : ObservableObject
         _pageStartOffset = start;
         _visitedPageStarts.Clear();
         await OnVisualPageChangedAsync(direction).ConfigureAwait(true);
+    }
+
+    /// <summary>Follow an internal hyperlink to its anchor: pushes the current page start onto the
+    /// browser-style link-back stack (separate from ordinary page navigation, which is discarded — a link
+    /// jump is a discontinuity for it) and lands on the target's segment.</summary>
+    public async Task FollowLinkAsync(string targetKey)
+    {
+        if (_document is null || !_anchors.TryGetValue(targetKey, out var target))
+        {
+            return;
+        }
+
+        var destination = ResolveLinkDestination(target);
+        _linkReturnStack.Push(_pageStartOffset);
+        CanGoBackFromLink = true;
+        _visitedPageStarts.Clear();
+        _pageStartOffset = destination;
+        await OnVisualPageChangedAsync(ReadingDirection.Forward).ConfigureAwait(true);
+    }
+
+    /// <summary>Browser-style Back for link jumps: returns to the page start recorded before the most
+    /// recent <see cref="FollowLinkAsync"/>.</summary>
+    [RelayCommand]
+    public async Task GoBackFromLinkAsync()
+    {
+        if (_linkReturnStack.Count == 0)
+        {
+            return;
+        }
+
+        _pageStartOffset = Math.Clamp(_linkReturnStack.Pop(), 0, Math.Max(0, (DisplayText?.Length ?? 1) - 1));
+        CanGoBackFromLink = _linkReturnStack.Count > 0;
+        _visitedPageStarts.Clear();
+        await OnVisualPageChangedAsync(ReadingDirection.Backward).ConfigureAwait(true);
+    }
+
+    /// <summary>A link's <see cref="LinkTarget.Offset"/> is measured into the segment's ORIGINAL text; the
+    /// current flow may hold a (usually longer) translation instead, so the offset is clamped to the
+    /// segment's current span before it is added to that segment's flow start — otherwise it could overshoot
+    /// into the next segment.</summary>
+    private int ResolveLinkDestination(LinkTarget target)
+    {
+        if (_segmentCharOffsets.Length == 0)
+        {
+            return 0;
+        }
+
+        var index = Math.Clamp(target.SegmentIndex, 0, _segmentCharOffsets.Length - 1);
+        var start = _segmentCharOffsets[index];
+        var end = index + 1 < _segmentCharOffsets.Length ? _segmentCharOffsets[index + 1] : (DisplayText?.Length ?? start);
+        var span = Math.Max(0, end - start);
+        var offsetWithinSegment = span == 0 ? 0 : Math.Clamp(target.Offset, 0, span - 1);
+        return Math.Clamp(start + offsetWithinSegment, 0, Math.Max(0, (DisplayText?.Length ?? 1) - 1));
+    }
+
+    /// <summary>Recomputes <see cref="VisibleLinks"/> from the links whose flow range intersects the current
+    /// visual page. Links are followable in the original view only.</summary>
+    private void RebuildVisibleLinks()
+    {
+        if (ShowingTranslation || _metrics is null || _links.Count == 0
+            || VisiblePageText is not { Length: > 0 } visible)
+        {
+            VisibleLinks = [];
+            return;
+        }
+
+        var pageStart = _pageStartOffset;
+        var pageEnd = pageStart + visible.Length;
+        var result = new List<VisibleLink>();
+        foreach (var link in _links)
+        {
+            if (link.SegmentIndex < 0 || link.SegmentIndex >= _segmentCharOffsets.Length)
+            {
+                continue; // stale reference from a differently-segmented document (shouldn't happen)
+            }
+
+            var flowStart = _segmentCharOffsets[link.SegmentIndex] + link.Start;
+            var flowEnd = flowStart + link.Length;
+            var overlapStart = Math.Max(flowStart, pageStart);
+            var overlapEnd = Math.Min(flowEnd, pageEnd);
+            if (overlapEnd <= overlapStart)
+            {
+                continue; // not on this visual page
+            }
+
+            result.Add(new VisibleLink(overlapStart - pageStart, overlapEnd - overlapStart, link.TargetKey));
+        }
+
+        VisibleLinks = result;
     }
 
     [RelayCommand]
@@ -757,12 +868,14 @@ public sealed partial class ReaderViewModel : ObservableObject
         if (string.IsNullOrEmpty(text) || _metrics is not { } metrics)
         {
             VisiblePageText = text; // no metrics yet: show the flow so nothing is blank pre-layout
+            RebuildVisibleLinks();
             return;
         }
 
         _pageStartOffset = Math.Clamp(_pageStartOffset, 0, Math.Max(0, text.Length - 1));
         var consumed = _paginator.MeasurePage(text, _pageStartOffset, metrics);
         VisiblePageText = consumed <= 0 ? string.Empty : text.Substring(_pageStartOffset, consumed);
+        RebuildVisibleLinks();
     }
 
     /// <summary>Rebuilds the flow text from the store — each paragraph translated where held, original
@@ -827,6 +940,18 @@ public sealed partial class ReaderViewModel : ObservableObject
                 for (var i = remapped.Length - 1; i >= 0; i--) // rebuild top-of-stack last to keep order
                 {
                     _visitedPageStarts.Push(remapped[i]);
+                }
+            }
+
+            if (_linkReturnStack.Count > 0)
+            {
+                var remappedLinkReturns = _linkReturnStack
+                    .Select(o => RemapOffset(o, oldOffsets, oldFlowLength, offsets, newFlowLength))
+                    .ToArray();
+                _linkReturnStack.Clear();
+                for (var i = remappedLinkReturns.Length - 1; i >= 0; i--) // rebuild top-of-stack last to keep order
+                {
+                    _linkReturnStack.Push(remappedLinkReturns[i]);
                 }
             }
         }
@@ -902,6 +1027,7 @@ public sealed partial class ReaderViewModel : ObservableObject
         BuildContinuousText();
         RecountVisualPages();
         UpdateNavigation();
+        RebuildVisibleLinks();
     }
 
     /// <summary>
