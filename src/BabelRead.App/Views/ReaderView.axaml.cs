@@ -6,6 +6,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using BabelRead.App.Controls;
 using BabelRead.App.ViewModels;
 using System.Threading;
 
@@ -27,6 +28,7 @@ public partial class ReaderView : UserControl
 
     private readonly Panel _readingSurface;
     private readonly Border _toolbar;
+    private readonly LinkableTextBlock _pageText;
     private readonly DispatcherTimer _toolbarHideTimer;
     private bool _pointerOverToolbar;
     private CancellationTokenSource? _reflowCts;
@@ -42,6 +44,8 @@ public partial class ReaderView : UserControl
         this.FindControl<Button>("SettingsButton")!.Click += (_, _) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
         _readingSurface = this.FindControl<Panel>("ReadingSurface")!;
         _toolbar = this.FindControl<Border>("Toolbar")!;
+        _pageText = this.FindControl<LinkableTextBlock>("PageText")!;
+        _pageText.LinkInvoked += (_, key) => _ = ViewModel?.FollowLinkAsync(key);
 
         // Re-measure the visual page only when the reading surface is actually resized. Reflowing on text
         // changes would feed back on itself: a landing translation changes the text, which changes the
@@ -200,6 +204,19 @@ public partial class ReaderView : UserControl
             return;
         }
 
+        // Browser-style Back for a followed internal link. Alt+Left carries a modifier the guard below
+        // would otherwise swallow, so it is handled here, ahead of it; plain Left still pages further down.
+        if (e.Key == Key.Left && e.KeyModifiers == KeyModifiers.Alt)
+        {
+            if (ViewModel.CanGoBackFromLink)
+            {
+                e.Handled = true;
+                await ViewModel.GoBackFromLinkAsync();
+            }
+
+            return;
+        }
+
         if (e.KeyModifiers != KeyModifiers.None)
         {
             return;
@@ -207,6 +224,10 @@ public partial class ReaderView : UserControl
 
         switch (e.Key)
         {
+            case Key.Back when ViewModel.CanGoBackFromLink:
+                e.Handled = true;
+                await ViewModel.GoBackFromLinkAsync();
+                break;
             case Key.Left or Key.PageUp:
                 e.Handled = true;
                 await ViewModel.PreviousPageAsync();
@@ -268,8 +289,7 @@ public partial class ReaderView : UserControl
                 }
 
                 _lastReflowSize = size;
-                var pageText = this.FindControl<SelectableTextBlock>("PageText");
-                var typeface = pageText is not null ? new Typeface(pageText.FontFamily) : Typeface.Default;
+                var typeface = new Typeface(_pageText.FontFamily);
                 ViewModel.SetReadingMetrics(size.Width, size.Height, typeface);
             }
             catch (OperationCanceledException)

@@ -33,7 +33,8 @@
     <Panel Name="ReadingSurface" IsVisible="{Binding IsContentVisible}" ClipToBounds="True">
       <!-- Centered, justified column with a comfortable measure. The inset is a margin on the text; the top
            inset clears the floating toolbar. The paginator subtracts these to know the space the text gets. -->
-      <SelectableTextBlock Name="PageText" Text="{Binding VisiblePageText}"
+      <controls:LinkableTextBlock Name="PageText" Text="{Binding VisiblePageText}"
+                           Links="{Binding VisibleLinks}" LinksEnabled="{Binding !ShowingTranslation}"
                            FlowDirection="{Binding ReadingFlowDirection}"
                            AutomationProperties.Name="Page text"
                            TextWrapping="Wrap" TextAlignment="Justify"
@@ -95,6 +96,9 @@
         </StackPanel>
 
         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+          <!-- Browser-style Back for a followed internal link; hidden until there is somewhere to return to. -->
+          <Button Classes="tool nav" Content="‹" Command="{Binding GoBackFromLinkCommand}"
+                  IsVisible="{Binding CanGoBackFromLink}" AutomationProperties.Name="Back" />
           <Button Classes="tool nav" Content="‹" Command="{Binding PreviousPageCommand}"
                   IsEnabled="{Binding CanGoPrevious}" AutomationProperties.Name="Previous page" />
           <Button Classes="tool nav" Content="›" Command="{Binding NextPageCommand}"

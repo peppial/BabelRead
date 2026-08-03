@@ -1,7 +1,9 @@
 using Avalonia;
 using Avalonia.Threading;
 using Avalonia.Controls;
+using Avalonia.Controls.Documents;
 using Avalonia.Headless.XUnit;
+using Avalonia.Media;
 using Avalonia.VisualTree;
 using BabelRead.App.Controls;
 using BabelRead.App.ViewModels;
@@ -120,6 +122,35 @@ public class ViewSmokeTests
         // The page sits at the top inset, not centred in the window.
         var textTop = text.TranslatePoint(new Point(0, 0), surface)!.Value.Y;
         Assert.True(textTop < surface.Bounds.Height / 2, $"page must sit near the top, not centred (top={textTop})");
+    }
+
+    [AvaloniaFact]
+    public void Original_view_renders_a_clickable_link_run_translation_view_does_not()
+    {
+        var store = new InMemoryTranslationStore();
+        var vm = new ReaderViewModel(
+            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
+            new TranslationService(new StubChatClientFactory(new FakeChatClient()), store),
+            store,
+            new NoOpPrefetchCoordinator(),
+            new JsonPreferencesStore(Path.Combine(Path.GetTempPath(), $"{System.Guid.NewGuid():n}.json")));
+        vm.ShowingTranslation = false;
+        vm.VisiblePageText = "See the note here.";
+        // Simulate one visible link over "note" (offsets 8..12).
+        vm.VisibleLinks = new[] { new ReaderViewModel.VisibleLink(8, 4, "ch2.xhtml#note") };
+
+        var view = new ReaderView { DataContext = vm };
+        var window = new Window { Content = view, Width = 800, Height = 900 };
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        var page = view.GetVisualDescendants().OfType<LinkableTextBlock>().Single();
+        Assert.Contains(page.Inlines!, i => i is Run r && r.TextDecorations == TextDecorations.Underline);
+
+        page.LinksEnabled = false; // translation view
+        Dispatcher.UIThread.RunJobs();
+        Assert.DoesNotContain(page.Inlines!, i => i is Run r && r.TextDecorations == TextDecorations.Underline);
+        Assert.Equal("See the note here.", page.Text); // plain path still renders the text
     }
 
     private sealed class EmptyOllamaCatalog : IOllamaModelCatalog
