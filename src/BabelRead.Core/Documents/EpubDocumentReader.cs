@@ -244,7 +244,7 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
 
     /// <summary>Maps a chapter-text offset to the segment that contains it. Offsets that land in a gap
     /// (whitespace trimmed away between blocks) clamp to whichever segment edge is nearer.</summary>
-    private static (int Index, int Offset) MapOffsetToSegment(
+    internal static (int Index, int Offset) MapOffsetToSegment(
         IReadOnlyList<(string Text, int Start, int Length)> ranges, int offset)
     {
         if (ranges.Count == 0)

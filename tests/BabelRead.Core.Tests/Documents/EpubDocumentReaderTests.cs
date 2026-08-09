@@ -160,30 +160,54 @@ public sealed class EpubDocumentReaderTests : IDisposable
     }
 
     [Fact]
-    public async Task Divergent_chapter_extraction_drops_its_links_and_anchors_but_keeps_clean_segment_text()
+    public async Task An_anchor_opening_a_chapter_keeps_that_chapters_extraction_usable()
     {
-        // ch0's body is an id-only <a> immediately followed by text at a block start: the sentinel the
-        // extractor splices in splits a whitespace run it can't rejoin, so its Text ends up with a spurious
-        // leading space HtmlToText never produces. Prove that divergence directly against the exact raw
-        // content the reader sees, before trusting any behavior downstream of the compare-and-drop guard.
-        var path = SampleDocuments.CreateEpubWithDivergentAnchor(Path.Combine(_dir, "divergent.epub"));
+        // ch0's body is an id-only <a> immediately followed by text at a block start. The sentinel the
+        // extractor splices in lands inside a whitespace run, which it must re-collapse the way HtmlToText
+        // does -- otherwise the texts diverge by a stray space and the compare-and-drop guard throws away
+        // every link and anchor in the chapter. Prove the agreement against the exact raw content the reader
+        // sees, then that the link downstream of it resolves.
+        var path = SampleDocuments.CreateEpubWithLeadingAnchor(Path.Combine(_dir, "leading.epub"));
         var book = await EpubReader.ReadBookAsync(path);
         var chapter0Raw = book.ReadingOrder[0].Content;
         var cleanChapter0Text = EpubDocumentReader.HtmlToText(chapter0Raw);
-        Assert.NotEqual(cleanChapter0Text, EpubLinkExtractor.Extract(chapter0Raw).Text);
+        Assert.Equal(cleanChapter0Text, EpubLinkExtractor.Extract(chapter0Raw).Text);
 
         using var reader = new EpubDocumentReader();
         var doc = await reader.OpenAsync(path, CancellationToken.None);
 
-        // (a) the divergent chapter contributes no anchors: its #note fragment must not resolve, so the
-        // ch1 link pointing at it is dropped as unresolved rather than corrupted.
+        // (a) ch0's #note anchor is published and ch1's link to it resolves.
+        var link = Assert.Single(doc.Links);
+        Assert.EndsWith("#note", link.TargetKey, StringComparison.Ordinal);
+        Assert.True(doc.Anchors.ContainsKey(link.TargetKey));
+
+        // (b) the anchor points at the text written right after it, and that text is untouched by extraction.
+        var target = doc.Anchors[link.TargetKey];
+        Assert.StartsWith("The note text", doc.Segments[target.SegmentIndex][target.Offset..], StringComparison.Ordinal);
+        Assert.Contains(doc.Segments, s => s == cleanChapter0Text);
+        Assert.DoesNotContain(doc.Segments, s => s.StartsWith(' '));
+    }
+
+    [Fact]
+    public async Task A_chapter_using_the_extractors_own_marker_characters_drops_its_links_and_anchors()
+    {
+        // ch0's text contains U+E000 -- a private-use scalar of the kind icon fonts use, indistinguishable
+        // from the marker EpubLinkExtractor splices in. Rather than pair hrefs with spans measured against
+        // someone else's character, the extractor refuses the chapter and the guard drops what it produced.
+        var path = SampleDocuments.CreateEpubWithPrivateUseCharacter(Path.Combine(_dir, "privateuse.epub"));
+        var book = await EpubReader.ReadBookAsync(path);
+        var chapter0Raw = book.ReadingOrder[0].Content;
+        Assert.Equal(string.Empty, EpubLinkExtractor.Extract(chapter0Raw).Text);
+
+        using var reader = new EpubDocumentReader();
+        var doc = await reader.OpenAsync(path, CancellationToken.None);
+
+        // (a) the refused chapter contributes no anchors, so ch1's link to its #note is dropped as unresolved.
         Assert.DoesNotContain(doc.Anchors.Keys, k => k.EndsWith("#note", StringComparison.Ordinal));
         Assert.Empty(doc.Links);
 
-        // (b) the chapter's segment text is still exactly HtmlToText's clean output: uncorrupted, no
-        // spurious leading space leaked in from the dropped extraction.
-        Assert.Contains(doc.Segments, s => s == cleanChapter0Text);
-        Assert.DoesNotContain(doc.Segments, s => s.StartsWith(' '));
+        // (b) the chapter's segment text is still exactly HtmlToText's output -- reading is never affected.
+        Assert.Contains(doc.Segments, s => s == EpubDocumentReader.HtmlToText(chapter0Raw));
     }
 
     [Fact]
@@ -219,13 +243,11 @@ public sealed class EpubDocumentReaderTests : IDisposable
     }
 
     [Fact]
-    public async Task Link_to_an_anchor_between_two_segments_resolves_via_the_offset_gap_ternary()
+    public async Task Link_to_an_anchor_between_two_segments_lands_on_the_following_one()
     {
         // ch1 holds two standalone paragraphs (each >= MinSegmentChars, so neither is coalesced) with the
-        // anchor sitting on the single-character gap trimmed away between them -- not past every range (the
-        // post-loop clamp covered by Link_to_a_trailing_empty_anchor_resolves_via_the_offset_gap_clamp above)
-        // but strictly between two tracked ranges. This exercises MapOffsetToSegment's mid-loop two-edge
-        // ternary specifically.
+        // anchor written between them. Collapsing the whitespace either side of it puts the anchor on the
+        // second paragraph's first character: an anchor before a paragraph points at that paragraph.
         var path = SampleDocuments.CreateEpubWithAnchorBetweenTwoSegments(Path.Combine(_dir, "between.epub"));
         using var reader = new EpubDocumentReader();
         var doc = await reader.OpenAsync(path, CancellationToken.None);
@@ -234,19 +256,28 @@ public sealed class EpubDocumentReaderTests : IDisposable
         Assert.True(doc.Anchors.ContainsKey(link.TargetKey));
         var target = doc.Anchors[link.TargetKey];
 
-        // The target chapter contributes exactly two segments: the paragraph the anchor is nearer to
-        // (AlphaMarker), followed immediately by the other one (BetaMarker). Pinning both down (rather than
-        // just the one the anchor resolved to) is what proves there really are two ranges here, not one.
-        var firstSegment = doc.Segments[target.SegmentIndex];
-        var secondSegment = doc.Segments[target.SegmentIndex + 1];
-        Assert.Contains("AlphaMarker", firstSegment, StringComparison.Ordinal);
-        Assert.Contains("BetaMarker", secondSegment, StringComparison.Ordinal);
+        // Pinning the paragraph before it down too (rather than just the one the anchor resolved to) is what
+        // proves there really are two ranges here, not one merged segment the anchor fell inside of.
+        Assert.Contains("AlphaMarker", doc.Segments[target.SegmentIndex - 1], StringComparison.Ordinal);
+        Assert.Contains("BetaMarker", doc.Segments[target.SegmentIndex], StringComparison.Ordinal);
+        Assert.Equal(0, target.Offset);
+    }
 
-        // The two-edge ternary resolves to the PREVIOUS segment at its end. The post-loop clamp this must
-        // be distinguished from would instead return the LAST segment (BetaMarker's) at ITS length -- so
-        // landing on the FIRST (AlphaMarker) segment, at its own end, is exactly what proves the mid-loop
-        // ternary fired rather than the unconditional clamp after the loop.
-        Assert.Equal(firstSegment.Length, target.Offset);
+    [Theory]
+    // Offsets inside a range map to it directly; the gap between two ranges (whitespace trimmed away) goes
+    // to whichever edge is nearer; anything past the last range clamps to its end.
+    [InlineData(0, 0, 0)]
+    [InlineData(3, 0, 3)]
+    [InlineData(11, 1, 1)]
+    [InlineData(6, 0, 5)]  // gap 5..10, nearer the first range's end
+    [InlineData(9, 1, 0)]  // same gap, nearer the second range's start
+    [InlineData(99, 1, 5)] // past every range: clamps to the last one's end
+    public void MapOffsetToSegment_places_an_offset_on_a_segment(int offset, int expectedIndex, int expectedOffset)
+    {
+        // Two ranges with a five-character gap between them, as a chapter's trimmed-away whitespace leaves.
+        (string Text, int Start, int Length)[] ranges = [("first", 0, 5), ("later", 10, 5)];
+
+        Assert.Equal((expectedIndex, expectedOffset), EpubDocumentReader.MapOffsetToSegment(ranges, offset));
     }
 
     public void Dispose()
