@@ -26,10 +26,17 @@ public sealed class LinkableTextBlock : SelectableTextBlock
     /// <summary>Raised with a link's target key when the reader clicks it.</summary>
     public event EventHandler<string>? LinkInvoked;
 
+    private static readonly Cursor HandCursor = new(StandardCursorType.Hand);
+
     private Point _pressPoint;
+    private bool _showingLinkCursor;
 
     static LinkableTextBlock()
     {
+        // A text block with no Background is hit-test transparent: pointer events pass straight through it
+        // to whatever is behind, so neither a link click nor a selection drag would ever reach this control.
+        BackgroundProperty.OverrideDefaultValue<LinkableTextBlock>(Brushes.Transparent);
+
         // Rebuild the rendered runs whenever the underlying text or the link set changes.
         TextProperty.Changed.AddClassHandler<LinkableTextBlock>((c, _) => c.Rebuild());
         LinksProperty.Changed.AddClassHandler<LinkableTextBlock>((c, _) => c.Rebuild());
@@ -88,16 +95,11 @@ public sealed class LinkableTextBlock : SelectableTextBlock
         base.OnPointerPressed(e);
     }
 
-    /// <summary>A click (not a drag-select) inside an underlined run's text position raises
-    /// <see cref="LinkInvoked"/>. Selection still works normally otherwise.</summary>
+    /// <summary>A click (not a drag-select) inside an underlined run raises <see cref="LinkInvoked"/>.
+    /// Selection still works normally otherwise.</summary>
     protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
         base.OnPointerReleased(e);
-        if (Links is not { Count: > 0 } links)
-        {
-            return;
-        }
-
         var point = e.GetPosition(this);
         if (Math.Abs(point.X - _pressPoint.X) > 3 || Math.Abs(point.Y - _pressPoint.Y) > 3)
         {
@@ -109,20 +111,75 @@ public sealed class LinkableTextBlock : SelectableTextBlock
             return;
         }
 
-        var hit = TextLayout.HitTestPoint(point);
-        if (!hit.IsInside)
+        if (LinkAt(point) is { } link)
+        {
+            LinkInvoked?.Invoke(this, link.TargetKey);
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>Over a link the pointer becomes a hand, the signal that the text can be clicked; elsewhere
+    /// the control's own cursor (the I-beam that says the text can be selected) is left alone.</summary>
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        base.OnPointerMoved(e);
+        ShowLinkCursor(LinkAt(e.GetPosition(this)) is not null);
+    }
+
+    protected override void OnPointerExited(PointerEventArgs e)
+    {
+        base.OnPointerExited(e);
+        ShowLinkCursor(false);
+    }
+
+    private void ShowLinkCursor(bool overLink)
+    {
+        if (overLink == _showingLinkCursor)
         {
             return;
         }
 
+        _showingLinkCursor = overLink;
+        if (overLink)
+        {
+            SetCurrentValue(CursorProperty, HandCursor);
+        }
+        else
+        {
+            ClearValue(CursorProperty); // back to whatever the theme dresses selectable text in
+        }
+    }
+
+    /// <summary>The link drawn under <paramref name="point"/>, if any. Asks the layout for the rectangles
+    /// each link's text actually occupies: resolving the point to a text position instead would mean
+    /// trusting <c>TextHitTestResult.IsInside</c> to say whether it is on text at all, and that reports
+    /// false for points squarely on a glyph once the reader's line height is applied.</summary>
+    private VisibleLink? LinkAt(Point point)
+    {
+        if (Links is not { Count: > 0 } links)
+        {
+            return null;
+        }
+
+        var length = (Text ?? string.Empty).Length;
         foreach (var link in links)
         {
-            if (hit.TextPosition >= link.Start && hit.TextPosition < link.Start + link.Length)
+            var start = Math.Clamp(link.Start, 0, length);
+            var end = Math.Clamp(start + link.Length, start, length);
+            if (end == start)
             {
-                LinkInvoked?.Invoke(this, link.TargetKey);
-                e.Handled = true;
-                return;
+                continue;
+            }
+
+            foreach (var rect in TextLayout.HitTestTextRange(start, end - start)) // one per line it wraps over
+            {
+                if (rect.Contains(point))
+                {
+                    return link;
+                }
             }
         }
+
+        return null;
     }
 }
