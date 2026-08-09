@@ -34,7 +34,7 @@
       <!-- Centered, justified column with a comfortable measure. The inset is a margin on the text; the top
            inset clears the floating toolbar. The paginator subtracts these to know the space the text gets. -->
       <controls:LinkableTextBlock Name="PageText" Text="{Binding VisiblePageText}"
-                           Links="{Binding VisibleLinks}" LinksEnabled="{Binding !ShowingTranslation}"
+                           Links="{Binding VisibleLinks}"
                            FlowDirection="{Binding ReadingFlowDirection}"
                            AutomationProperties.Name="Page text"
                            TextWrapping="Wrap" TextAlignment="Justify"

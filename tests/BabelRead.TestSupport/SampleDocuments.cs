@@ -140,6 +140,14 @@ public static class SampleDocuments
         "See <a href=\"ch1.xhtml#note\">the note</a>.",
         "The note body is here with enough words to form a segment.<a id=\"note\"></a>");
 
+    /// <summary>A 2-chapter book whose <c>ch0</c> is a little menu: each entry on its own line, the middle
+    /// one a link into <c>ch1</c>. Line-per-entry is the shape a translation keeps, so this is the link a
+    /// reader can still follow while reading the translation (unlike one written inside a sentence, as in
+    /// <see cref="CreateEpubWithInternalLink"/>).</summary>
+    public static string CreateEpubWithWholeLineLink(string path) => CreateEpub(path, "Menu", "en",
+        "Contents<br/><a href=\"ch1.xhtml#note\">The note</a><br/>End of contents",
+        "The note body is here with enough words to form a segment.<a id=\"note\"></a>");
+
     /// <summary>A single-chapter book with one external link (dropped as out-of-document) and one
     /// dangling internal link to a nonexistent anchor (dropped as unresolved).</summary>
     public static string CreateEpubWithExternalAndDanglingLinks(string path) => CreateEpub(path, "Ext", "en",

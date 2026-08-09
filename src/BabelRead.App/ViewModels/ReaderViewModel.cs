@@ -25,6 +25,9 @@ public sealed partial class ReaderViewModel : ObservableObject
     private const double BaselineLayoutWidth = 1280;
     private const double BaselineLayoutHeight = 800;
 
+    /// <summary>Blank line the flow puts between paragraphs, so each one reads as its own block.</summary>
+    private const string ParagraphJoin = "\n\n";
+
     private readonly DocumentReaderRegistry _readers;
     private readonly ITranslationService _translation;
     private readonly ITranslationStore _store;
@@ -55,9 +58,11 @@ public sealed partial class ReaderViewModel : ObservableObject
     private int _pageStartOffset;
     private readonly Stack<int> _visitedPageStarts = new();  // page starts we can pop straight back to
 
-    // Internal hyperlinks (EPUB only; empty for PDF): followed in the original view, with a browser-style
-    // Back stack separate from ordinary page navigation.
-    private IReadOnlyList<DocumentLink> _links = [];
+    // Internal hyperlinks (EPUB only; empty for PDF), grouped by the paragraph holding them: locating them
+    // on screen is per-paragraph work in the translation view. Following one uses a browser-style Back
+    // stack separate from ordinary page navigation.
+    private IReadOnlyDictionary<int, IReadOnlyList<DocumentLink>> _linksBySegment =
+        new Dictionary<int, IReadOnlyList<DocumentLink>>();
     private IReadOnlyDictionary<string, LinkTarget> _anchors = new Dictionary<string, LinkTarget>();
     private readonly Stack<int> _linkReturnStack = new();
 
@@ -179,6 +184,7 @@ public sealed partial class ReaderViewModel : ObservableObject
 
     /// <summary>An internal hyperlink located within the current visual page, in page-relative coordinates.</summary>
     public readonly record struct VisibleLink(int Start, int Length, string TargetKey);
+
 
     /// <summary>Right-to-left when showing a translation into an RTL language (Arabic, Hebrew, ...).</summary>
     public Avalonia.Media.FlowDirection ReadingFlowDirection =>
@@ -367,7 +373,9 @@ public sealed partial class ReaderViewModel : ObservableObject
             _document = await _reader.OpenAsync(path, CancellationToken.None).ConfigureAwait(true);
             Title = _document.Title;
             PageCount = _document.PageCount;
-            _links = _document.Links;
+            _linksBySegment = _document.Links
+                .GroupBy(link => link.SegmentIndex)
+                .ToDictionary(g => g.Key, g => (IReadOnlyList<DocumentLink>)g.ToArray());
             _anchors = _document.Anchors;
             _linkReturnStack.Clear();
             CanGoBackFromLink = false;
@@ -547,11 +555,11 @@ public sealed partial class ReaderViewModel : ObservableObject
     }
 
     /// <summary>Recomputes <see cref="VisibleLinks"/> from the links whose flow range intersects the current
-    /// visual page. Links are followable in the original view only.</summary>
+    /// visual page. Only the paragraphs actually on screen are placed, since placing one in the translation
+    /// view means matching it up against the translated text.</summary>
     private void RebuildVisibleLinks()
     {
-        if (ShowingTranslation || _metrics is null || _links.Count == 0
-            || VisiblePageText is not { Length: > 0 } visible)
+        if (_metrics is null || _linksBySegment.Count == 0 || VisiblePageText is not { Length: > 0 } visible)
         {
             VisibleLinks = [];
             return;
@@ -560,27 +568,76 @@ public sealed partial class ReaderViewModel : ObservableObject
         var pageStart = _pageStartOffset;
         var pageEnd = pageStart + visible.Length;
         var result = new List<VisibleLink>();
-        foreach (var link in _links)
+        foreach (var (segmentIndex, segmentLinks) in _linksBySegment)
         {
-            if (link.SegmentIndex < 0 || link.SegmentIndex >= _segmentCharOffsets.Length)
+            if (segmentIndex < 0 || segmentIndex >= _segmentCharOffsets.Length)
             {
                 continue; // stale reference from a differently-segmented document (shouldn't happen)
             }
 
-            var flowStart = _segmentCharOffsets[link.SegmentIndex] + link.Start;
-            var flowEnd = flowStart + link.Length;
-            var overlapStart = Math.Max(flowStart, pageStart);
-            var overlapEnd = Math.Min(flowEnd, pageEnd);
-            if (overlapEnd <= overlapStart)
+            var segmentStart = _segmentCharOffsets[segmentIndex];
+            if (SegmentEnd(segmentIndex) <= pageStart || segmentStart >= pageEnd)
             {
-                continue; // not on this visual page
+                continue; // this paragraph is off screen
             }
 
-            result.Add(new VisibleLink(overlapStart - pageStart, overlapEnd - overlapStart, link.TargetKey));
+            foreach (var (link, start, length) in PlaceLinks(segmentIndex, segmentLinks))
+            {
+                var flowStart = segmentStart + start;
+                var overlapStart = Math.Max(flowStart, pageStart);
+                var overlapEnd = Math.Min(flowStart + length, pageEnd);
+                if (overlapEnd <= overlapStart)
+                {
+                    continue; // not on this visual page
+                }
+
+                result.Add(new VisibleLink(overlapStart - pageStart, overlapEnd - overlapStart, link.TargetKey));
+            }
         }
 
+        result.Sort((a, b) => a.Start.CompareTo(b.Start));
         VisibleLinks = result;
     }
+
+    /// <summary>Where each of a paragraph's links sits in the text currently on screen. A link's stored
+    /// offsets describe the ORIGINAL paragraph, so they hold as they are whenever that is what the flow
+    /// shows — the original view, and any paragraph not translated yet. Against a translation they are
+    /// meaningless, and <see cref="TranslatedLinkMapper"/> relocates the ones it can place; the rest are
+    /// left out rather than drawn over whichever words happen to sit at those offsets.</summary>
+    private IEnumerable<(DocumentLink Link, int Start, int Length)> PlaceLinks(
+        int segmentIndex, IReadOnlyList<DocumentLink> links)
+    {
+        var displayed = DisplayedSegmentText(segmentIndex);
+        var original = segmentIndex < _orderedSegments.Count ? _orderedSegments[segmentIndex] : displayed;
+        if (string.Equals(displayed, original, StringComparison.Ordinal))
+        {
+            foreach (var link in links)
+            {
+                yield return (link, link.Start, link.Length);
+            }
+
+            yield break;
+        }
+
+        var mapped = TranslatedLinkMapper.Map(original, displayed, links.Select(l => (l.Start, l.Length)).ToArray());
+        for (var i = 0; i < links.Count; i++)
+        {
+            if (mapped[i] is { } range)
+            {
+                yield return (links[i], range.Start, range.Length);
+            }
+        }
+    }
+
+    /// <summary>The paragraph's text as the flow currently holds it — its translation, or its original.</summary>
+    private string DisplayedSegmentText(int segmentIndex) =>
+        DisplayText is { } text ? text[_segmentCharOffsets[segmentIndex]..SegmentEnd(segmentIndex)] : string.Empty;
+
+    /// <summary>End of a paragraph's own text in the flow, excluding the blank line joining it to the next.</summary>
+    private int SegmentEnd(int segmentIndex) =>
+        segmentIndex + 1 < _segmentCharOffsets.Length
+            ? Math.Max(_segmentCharOffsets[segmentIndex], _segmentCharOffsets[segmentIndex + 1] - ParagraphJoin.Length)
+            : DisplayText?.Length ?? _segmentCharOffsets[segmentIndex];
 
     [RelayCommand]
     public void ToggleView() => ShowingTranslation = !ShowingTranslation;
@@ -916,7 +973,7 @@ public sealed partial class ReaderViewModel : ObservableObject
 
             if (i < _orderedSegments.Count - 1)
             {
-                builder.Append("\n\n");
+                builder.Append(ParagraphJoin);
             }
         }
 

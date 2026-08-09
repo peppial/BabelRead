@@ -8,29 +8,19 @@ using VisibleLink = BabelRead.App.ViewModels.ReaderViewModel.VisibleLink;
 namespace BabelRead.App.Controls;
 
 /// <summary>A <see cref="SelectableTextBlock"/> that renders internal-hyperlink runs as underlined,
-/// accent-colored text and raises <see cref="LinkInvoked"/> when one is clicked. Used in the original
-/// view only (<see cref="LinksEnabled"/> tracks <c>!ShowingTranslation</c>) — the translation view keeps
-/// the plain <see cref="TextBlock.Text"/> path, unaffected by <see cref="Links"/>.</summary>
+/// accent-colored text and raises <see cref="LinkInvoked"/> when one is clicked. What is linkable is
+/// entirely the view-model's call: it renders exactly the <see cref="Links"/> it is handed, and falls back
+/// to the plain <see cref="TextBlock.Text"/> path when handed none.</summary>
 public sealed class LinkableTextBlock : SelectableTextBlock
 {
     public static readonly StyledProperty<IReadOnlyList<VisibleLink>?> LinksProperty =
         AvaloniaProperty.Register<LinkableTextBlock, IReadOnlyList<VisibleLink>?>(nameof(Links));
-
-    public static readonly StyledProperty<bool> LinksEnabledProperty =
-        AvaloniaProperty.Register<LinkableTextBlock, bool>(nameof(LinksEnabled));
 
     /// <summary>Internal-hyperlink ranges within the current <see cref="TextBlock.Text"/>, relative to it.</summary>
     public IReadOnlyList<VisibleLink>? Links
     {
         get => GetValue(LinksProperty);
         set => SetValue(LinksProperty, value);
-    }
-
-    /// <summary>Whether link runs should be drawn (and be clickable). False in the translation view.</summary>
-    public bool LinksEnabled
-    {
-        get => GetValue(LinksEnabledProperty);
-        set => SetValue(LinksEnabledProperty, value);
     }
 
     /// <summary>Raised with a link's target key when the reader clicks it.</summary>
@@ -43,7 +33,6 @@ public sealed class LinkableTextBlock : SelectableTextBlock
         // Rebuild the rendered runs whenever the underlying text or the link set changes.
         TextProperty.Changed.AddClassHandler<LinkableTextBlock>((c, _) => c.Rebuild());
         LinksProperty.Changed.AddClassHandler<LinkableTextBlock>((c, _) => c.Rebuild());
-        LinksEnabledProperty.Changed.AddClassHandler<LinkableTextBlock>((c, _) => c.Rebuild());
     }
 
     /// <summary>Non-empty <see cref="TextBlock.Inlines"/> take precedence over <see cref="TextBlock.Text"/>
@@ -52,8 +41,7 @@ public sealed class LinkableTextBlock : SelectableTextBlock
     private void Rebuild()
     {
         var text = Text ?? string.Empty;
-        var links = LinksEnabled ? Links : null;
-        if (links is not { Count: > 0 })
+        if (Links is not { Count: > 0 } links)
         {
             Inlines?.Clear();
             SetCurrentValue(TextProperty, text); // plain path
@@ -105,7 +93,7 @@ public sealed class LinkableTextBlock : SelectableTextBlock
     protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
         base.OnPointerReleased(e);
-        if (!LinksEnabled || Links is not { Count: > 0 } links)
+        if (Links is not { Count: > 0 } links)
         {
             return;
         }

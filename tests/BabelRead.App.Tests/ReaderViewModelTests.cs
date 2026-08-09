@@ -690,14 +690,40 @@ public sealed class ReaderViewModelTests : IDisposable
     }
 
     [AvaloniaFact]
-    public async Task Links_are_not_exposed_while_reading_the_translation()
+    public async Task A_link_on_its_own_line_is_followable_in_the_translation_too()
     {
         var vm = CreateViewModel();
+        await vm.SetTargetLanguageAsync(new LanguageCode("bg")); // the fixtures are in English: translate them
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithWholeLineLink(Path.Combine(_dir, "menu.epub")));
+        SetMetrics(vm);
+        vm.ShowingTranslation = true;
+        await PageForwardUntilVisibleAsync(vm, "The note");
+
+        // The fake translator prefixes "[translated] ", so the flow really is holding translated text and
+        // the link's stored offsets (measured against the original) no longer describe what is on screen.
+        Assert.Contains("[translated]", vm.DisplayText!, StringComparison.Ordinal);
+        var link = Assert.Single(vm.VisibleLinks);
+        Assert.Equal("The note", vm.VisiblePageText!.Substring(link.Start, link.Length));
+
+        await vm.FollowLinkAsync(link.TargetKey); // and it still navigates from the translation
+        Assert.True(vm.CanGoBackFromLink);
+    }
+
+    [AvaloniaFact]
+    public async Task A_link_inside_a_sentence_is_left_out_of_the_translation()
+    {
+        // Word order moves under translation, so there is no telling which words carry the link. It stays
+        // followable in the original, where the offsets still hold.
+        var vm = CreateViewModel();
+        await vm.SetTargetLanguageAsync(new LanguageCode("bg"));
         await vm.OpenAsync(SampleDocuments.CreateEpubWithInternalLink(Path.Combine(_dir, "linked.epub")));
         SetMetrics(vm);
 
         vm.ShowingTranslation = true;
+        await PageForwardUntilVisibleAsync(vm, "the note");
+        Assert.Contains("[translated]", vm.DisplayText!, StringComparison.Ordinal);
         Assert.Empty(vm.VisibleLinks);
+
         vm.ShowingTranslation = false;
         await PageForwardUntilLinkVisibleAsync(vm);
         Assert.NotEmpty(vm.VisibleLinks);

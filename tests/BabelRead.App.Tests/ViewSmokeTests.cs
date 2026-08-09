@@ -2,7 +2,9 @@ using Avalonia;
 using Avalonia.Threading;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
+using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
+using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.VisualTree;
 using BabelRead.App.Controls;
@@ -125,7 +127,7 @@ public class ViewSmokeTests
     }
 
     [AvaloniaFact]
-    public void Original_view_renders_a_clickable_link_run_translation_view_does_not()
+    public void The_reader_renders_a_link_run_and_falls_back_to_plain_text_without_one()
     {
         var store = new InMemoryTranslationStore();
         var vm = new ReaderViewModel(
@@ -147,7 +149,7 @@ public class ViewSmokeTests
         var page = view.GetVisualDescendants().OfType<LinkableTextBlock>().Single();
         Assert.Contains(page.Inlines!, i => i is Run r && r.TextDecorations == TextDecorations.Underline);
 
-        page.LinksEnabled = false; // translation view
+        vm.VisibleLinks = []; // a page the view-model could place no link on
         Dispatcher.UIThread.RunJobs();
         Assert.DoesNotContain(page.Inlines!, i => i is Run r && r.TextDecorations == TextDecorations.Underline);
         Assert.Equal("See the note here.", page.Text); // plain path still renders the text
