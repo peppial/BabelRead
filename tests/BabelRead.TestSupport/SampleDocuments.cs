@@ -65,8 +65,22 @@ public static class SampleDocuments
         return path;
     }
 
-    /// <summary>Writes a minimal valid EPUB with one XHTML file per chapter body.</summary>
-    public static string CreateEpub(string path, string title, string language, params string[] chapterBodies)
+    /// <summary>Writes a minimal valid EPUB with one XHTML file per chapter body, and a flat table of
+    /// contents listing every chapter.</summary>
+    public static string CreateEpub(string path, string title, string language, params string[] chapterBodies) =>
+        CreateEpubWithNavigation(path, title, language, FlatNavigation(chapterBodies.Length), chapterBodies);
+
+    /// <summary>One top-level contents entry per chapter, the shape most books have.</summary>
+    private static string FlatNavigation(int chapterCount) =>
+        string.Concat(Enumerable.Range(0, chapterCount)
+            .Select(i => $"<li><a href=\"ch{i}.xhtml\">Chapter {i + 1}</a></li>"));
+
+    /// <summary>As <see cref="CreateEpub(string,string,string,string[])"/>, with the navigation document's
+    /// list items supplied — so a test can give the book nested contents. Deliberately not an overload of
+    /// <c>CreateEpub</c>: a call passing several chapter bodies would bind to it silently, taking the first
+    /// body for the navigation.</summary>
+    public static string CreateEpubWithNavigation(
+        string path, string title, string language, string navigationItems, params string[] chapterBodies)
     {
         if (File.Exists(path))
         {
@@ -90,13 +104,13 @@ public static class SampleDocuments
 
         // EPUB 3 requires a navigation document referenced by the manifest with properties="nav".
         WriteEntry(archive, "OEBPS/nav.xhtml",
-            """
-            <?xml version="1.0" encoding="utf-8"?>
-            <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
-            <head><title>Contents</title></head>
-            <body><nav epub:type="toc"><ol><li><a href="ch0.xhtml">Start</a></li></ol></nav></body>
-            </html>
-            """);
+            $"""
+             <?xml version="1.0" encoding="utf-8"?>
+             <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+             <head><title>Contents</title></head>
+             <body><nav epub:type="toc"><ol>{navigationItems}</ol></nav></body>
+             </html>
+             """);
 
         var manifest = new StringBuilder();
         manifest.Append("<item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>");
@@ -139,6 +153,15 @@ public static class SampleDocuments
     public static string CreateEpubWithInternalLink(string path) => CreateEpub(path, "Linked", "en",
         "See <a href=\"ch1.xhtml#note\">the note</a>.",
         "The note body is here with enough words to form a segment.<a id=\"note\"></a>");
+
+    /// <summary>A 3-chapter book whose contents nest: chapters 2 and 3 sit under chapter 1, as sections of a
+    /// magazine sit under their heading. Chapter bodies are padded so each stands as its own segment.</summary>
+    public static string CreateEpubWithNestedContents(string path) => CreateEpubWithNavigation(path, "Nested", "en",
+        "<li><a href=\"ch0.xhtml\">Leaders</a><ol>"
+            + "<li><a href=\"ch1.xhtml\">Britain</a></li><li><a href=\"ch2.xhtml\">Culture</a></li></ol></li>",
+        "Leaders opens the issue with enough words to stand as a segment of its own in this fixture.",
+        "Britain follows with enough words of its own to stand as a segment in this particular fixture.",
+        "Culture closes the issue with enough words of its own to stand as a segment in this fixture.");
 
     /// <summary>A 2-chapter book whose <c>ch0</c> is a little menu: each entry on its own line, the middle
     /// one a link into <c>ch1</c>. Line-per-entry is the shape a translation keeps, so this is the link a

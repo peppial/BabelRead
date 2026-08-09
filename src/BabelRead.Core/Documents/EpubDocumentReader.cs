@@ -71,7 +71,8 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
                 new LanguageCode(language),
                 chapters.SelectMany(c => c).ToArray(),
                 links,
-                anchors);
+                anchors,
+                BuildContents(book.Navigation, anchors));
         }
         catch (DocumentOpenException)
         {
@@ -170,6 +171,55 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
         var anchors = BuildAnchorTable(chapterRanges, chapterExtracts, chapterFilePaths, chapterStartIndex);
         var links = BuildLinks(chapterRanges, chapterExtracts, chapterFilePaths, chapterStartIndex, anchors);
         return (chapters, links, anchors);
+    }
+
+    /// <summary>Flattens the book's navigation tree into contents entries, keeping each one's nesting depth
+    /// and dropping any whose destination is not in <paramref name="anchors"/> — an entry that cannot be
+    /// jumped to is worse than no entry. Group labels carrying no link of their own are dropped for the same
+    /// reason; their children stand on their own.</summary>
+    private static List<ContentsEntry> BuildContents(
+        IReadOnlyList<EpubNavigationItem>? navigation, IReadOnlyDictionary<string, LinkTarget> anchors)
+    {
+        var entries = new List<ContentsEntry>();
+        Walk(navigation, 0);
+        return entries;
+
+        void Walk(IReadOnlyList<EpubNavigationItem>? items, int depth)
+        {
+            foreach (var item in items ?? [])
+            {
+                var title = item.Title?.Trim();
+                if (title is { Length: > 0 } && ResolveNavigationLink(item.Link, anchors) is { } key)
+                {
+                    entries.Add(new ContentsEntry(title, key, depth));
+                }
+
+                Walk(item.NestedItems, depth + 1);
+            }
+        }
+    }
+
+    /// <summary>Turns a navigation item's target into an anchor-table key, or <see langword="null"/> for an
+    /// item that names no destination at all (a group label). The navigation document stores the content
+    /// file's path already resolved against the package, so only the fragment has to be reattached — no
+    /// relative-path handling, unlike an href written inside a chapter. A fragment the chapter turns out not
+    /// to carry falls back to the chapter itself: landing at the top of the right chapter beats dropping the
+    /// entry, and stale fragments are common in hand-maintained navigation.</summary>
+    private static string? ResolveNavigationLink(
+        EpubNavigationItemLink? link, IReadOnlyDictionary<string, LinkTarget> anchors)
+    {
+        if (link?.ContentFilePath is not { Length: > 0 } path)
+        {
+            return null;
+        }
+
+        var file = NormalizePath(path);
+        if (link.Anchor is { Length: > 0 } anchor && anchors.ContainsKey($"{file}#{NormalizeFragment(anchor)}"))
+        {
+            return $"{file}#{NormalizeFragment(anchor)}";
+        }
+
+        return anchors.ContainsKey(file) ? file : null;
     }
 
     /// <summary>Every anchor a link could target: one entry per <c>id</c>/<c>name</c> in the chapter, plus
