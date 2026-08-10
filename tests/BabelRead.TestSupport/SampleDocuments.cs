@@ -65,8 +65,22 @@ public static class SampleDocuments
         return path;
     }
 
-    /// <summary>Writes a minimal valid EPUB with one XHTML file per chapter body.</summary>
-    public static string CreateEpub(string path, string title, string language, params string[] chapterBodies)
+    /// <summary>Writes a minimal valid EPUB with one XHTML file per chapter body, and a flat table of
+    /// contents listing every chapter.</summary>
+    public static string CreateEpub(string path, string title, string language, params string[] chapterBodies) =>
+        CreateEpubWithNavigation(path, title, language, FlatNavigation(chapterBodies.Length), chapterBodies);
+
+    /// <summary>One top-level contents entry per chapter, the shape most books have.</summary>
+    private static string FlatNavigation(int chapterCount) =>
+        string.Concat(Enumerable.Range(0, chapterCount)
+            .Select(i => $"<li><a href=\"ch{i}.xhtml\">Chapter {i + 1}</a></li>"));
+
+    /// <summary>As <see cref="CreateEpub(string,string,string,string[])"/>, with the navigation document's
+    /// list items supplied — so a test can give the book nested contents. Deliberately not an overload of
+    /// <c>CreateEpub</c>: a call passing several chapter bodies would bind to it silently, taking the first
+    /// body for the navigation.</summary>
+    public static string CreateEpubWithNavigation(
+        string path, string title, string language, string navigationItems, params string[] chapterBodies)
     {
         if (File.Exists(path))
         {
@@ -90,13 +104,13 @@ public static class SampleDocuments
 
         // EPUB 3 requires a navigation document referenced by the manifest with properties="nav".
         WriteEntry(archive, "OEBPS/nav.xhtml",
-            """
-            <?xml version="1.0" encoding="utf-8"?>
-            <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
-            <head><title>Contents</title></head>
-            <body><nav epub:type="toc"><ol><li><a href="ch0.xhtml">Start</a></li></ol></nav></body>
-            </html>
-            """);
+            $"""
+             <?xml version="1.0" encoding="utf-8"?>
+             <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+             <head><title>Contents</title></head>
+             <body><nav epub:type="toc"><ol>{navigationItems}</ol></nav></body>
+             </html>
+             """);
 
         var manifest = new StringBuilder();
         manifest.Append("<item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>");
@@ -140,18 +154,45 @@ public static class SampleDocuments
         "See <a href=\"ch1.xhtml#note\">the note</a>.",
         "The note body is here with enough words to form a segment.<a id=\"note\"></a>");
 
+    /// <summary>A 3-chapter book whose contents nest: chapters 2 and 3 sit under chapter 1, as sections of a
+    /// magazine sit under their heading. Chapter bodies are padded so each stands as its own segment.</summary>
+    public static string CreateEpubWithNestedContents(string path) => CreateEpubWithNavigation(path, "Nested", "en",
+        "<li><a href=\"ch0.xhtml\">Leaders</a><ol>"
+            + "<li><a href=\"ch1.xhtml\">Britain</a></li><li><a href=\"ch2.xhtml\">Culture</a></li></ol></li>",
+        "Leaders opens the issue with enough words to stand as a segment of its own in this fixture.",
+        "Britain follows with enough words of its own to stand as a segment in this particular fixture.",
+        "Culture closes the issue with enough words of its own to stand as a segment in this fixture.");
+
+    /// <summary>A 2-chapter book whose <c>ch0</c> is a little menu: each entry on its own line, the middle
+    /// one a link into <c>ch1</c>. Line-per-entry is the shape a translation keeps, so this is the link a
+    /// reader can still follow while reading the translation (unlike one written inside a sentence, as in
+    /// <see cref="CreateEpubWithInternalLink"/>).</summary>
+    public static string CreateEpubWithWholeLineLink(string path) => CreateEpub(path, "Menu", "en",
+        "Contents<br/><a href=\"ch1.xhtml#note\">The note</a><br/>End of contents",
+        "The note body is here with enough words to form a segment.<a id=\"note\"></a>");
+
     /// <summary>A single-chapter book with one external link (dropped as out-of-document) and one
     /// dangling internal link to a nonexistent anchor (dropped as unresolved).</summary>
     public static string CreateEpubWithExternalAndDanglingLinks(string path) => CreateEpub(path, "Ext", "en",
         "<a href=\"https://example.com\">out</a> and <a href=\"#missing\">nowhere</a>.");
 
-    /// <summary>A 2-chapter book whose <c>ch0</c> body triggers <c>EpubLinkExtractor</c>/<c>HtmlToText</c>
-    /// divergence: an id-only <c>&lt;a&gt;</c> immediately followed by text at a block start splits a
-    /// whitespace run the extractor's sentinel can't rejoin, leaving a spurious leading space that
-    /// <c>HtmlToText</c> never produces. <c>ch1</c> links back to <c>ch0</c>'s (untrustworthy) anchor, so if
-    /// the compare-and-drop guard ever failed to protect <c>ch0</c>, that link would resolve.</summary>
-    public static string CreateEpubWithDivergentAnchor(string path) => CreateEpub(path, "Divergent", "en",
+    /// <summary>A 2-chapter book whose <c>ch0</c> opens with an id-only <c>&lt;a&gt;</c> immediately followed
+    /// by text at a block start — the arrangement that used to split a whitespace run the extractor's
+    /// sentinel could not rejoin, diverging from <c>HtmlToText</c> by a spurious leading space and costing
+    /// the chapter every link and anchor it had. <c>ch1</c> links back to <c>ch0</c>'s anchor, so the link
+    /// resolving is what proves the two texts now agree.</summary>
+    public static string CreateEpubWithLeadingAnchor(string path) => CreateEpub(path, "Leading", "en",
         "<a id=\"note\"></a>The note text here with enough words to form a segment for testing purposes indeed.",
+        "See <a href=\"ch0.xhtml#note\">the note</a> in chapter one for details, and here is filler text to " +
+        "make this segment long enough to stand on its own without being coalesced awkwardly into adjacent " +
+        "content in a strange way for this particular test fixture to behave reliably as intended.");
+
+    /// <summary>A 2-chapter book whose <c>ch0</c> text contains U+E000 — a private-use scalar of the kind
+    /// icon fonts use, and the same one <c>EpubLinkExtractor</c> splices in as a marker. The extractor must
+    /// refuse the whole chapter, so <c>ch0</c> contributes no anchor and <c>ch1</c>'s link to it is dropped
+    /// as unresolved rather than resolving to a span measured against someone else's character.</summary>
+    public static string CreateEpubWithPrivateUseCharacter(string path) => CreateEpub(path, "PrivateUse", "en",
+        "<a id=\"note\"></a>The note text \uE000 here with enough words to form a segment for testing indeed.",
         "See <a href=\"ch0.xhtml#note\">the note</a> in chapter one for details, and here is filler text to " +
         "make this segment long enough to stand on its own without being coalesced awkwardly into adjacent " +
         "content in a strange way for this particular test fixture to behave reliably as intended.");
@@ -168,18 +209,10 @@ public static class SampleDocuments
 
     /// <summary>A 2-chapter book whose <c>ch1</c> holds exactly <em>two</em> tracked segment ranges (two
     /// paragraphs each comfortably over <c>MinSegmentChars</c>, so neither is coalesced into the other) with
-    /// a self-closing, content-less <c>&lt;a id&gt;</c> anchor sitting on the single-character gap between
-    /// them (<c>"\n&lt;a id=\"mark\"/&gt;\n"</c>) rather than past every range. Resolving it exercises
-    /// <c>MapOffsetToSegment</c>'s mid-loop two-edge ternary -- distinct from <see cref="CreateEpubWithTrailingAnchor"/>'s
-    /// post-loop clamp -- and lands nearer the first paragraph's end. <c>ch0</c> links to it.
-    /// <para>Placing the anchor directly against a <c>&lt;p&gt;</c>/<c>&lt;p&gt;</c> block-tag boundary (or
-    /// as a paired <c>&lt;a id&gt;&lt;/a&gt;</c>) was tried first and always tripped the compare-and-drop
-    /// guard: <c>EpubLinkExtractor</c>'s sentinel characters sit between a stripped-tag's leftover space and
-    /// the adjacent newline on one side, blocking the same whitespace-collapse <c>HtmlToText</c> performs
-    /// unobstructed, so the two texts diverged by a stray space or an uncollapsed newline run every time. A
-    /// bare, self-closing anchor between two literal single newlines (no <c>&lt;p&gt;</c> tags at all inside
-    /// the chapter body) is the one arrangement found where the sentinel's neighboring leftover space is
-    /// consumed identically on both paths, so the extracted text matches exactly.</para></summary>
+    /// a self-closing, content-less <c>&lt;a id&gt;</c> anchor between them. The extractor collapses the
+    /// whitespace either side of that anchor into the one paragraph break the reader's text has, leaving the
+    /// anchor on the second paragraph's first character — an anchor written before a paragraph points at
+    /// that paragraph. <c>ch0</c> links to it.</summary>
     public static string CreateEpubWithAnchorBetweenTwoSegments(string path) => CreateEpub(path, "Between", "en",
         "See <a href=\"ch1.xhtml#mark\">the mark</a> for more, and here is filler text padding this segment " +
         "out to a reasonable length so it stands on its own as a proper paragraph in this test fixture.",

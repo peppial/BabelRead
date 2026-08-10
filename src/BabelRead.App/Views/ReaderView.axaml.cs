@@ -47,6 +47,13 @@ public partial class ReaderView : UserControl
         _pageText = this.FindControl<LinkableTextBlock>("PageText")!;
         _pageText.LinkInvoked += (_, key) => _ = ViewModel?.FollowLinkAsync(key);
 
+        // Opening the Contents is what pays for translating its titles — a reader who never opens it is
+        // never charged for it, and the list shows the original titles until the translation lands.
+        if (this.FindControl<Button>("ContentsButton")?.Flyout is { } contentsFlyout)
+        {
+            contentsFlyout.Opened += (_, _) => _ = ViewModel?.PrepareContentsAsync();
+        }
+
         // Re-measure the visual page only when the reading surface is actually resized. Reflowing on text
         // changes would feed back on itself: a landing translation changes the text, which changes the
         // layout, which would re-slice the page under the reader's eyes.

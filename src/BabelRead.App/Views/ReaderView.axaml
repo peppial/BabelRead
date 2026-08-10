@@ -8,6 +8,9 @@
     <!-- Material "translate" glyph (24×24 viewport), drawn as vector geometry so it renders on any
          platform without depending on a font that happens to carry a translate character. -->
     <StreamGeometry x:Key="TranslateIcon">M12.87 15.07l-2.54-2.51.03-.03c1.74-1.94 2.98-4.17 3.71-6.53H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z</StreamGeometry>
+
+    <!-- Material "list" glyph: the table-of-contents affordance, the same shape e-readers use. -->
+    <StreamGeometry x:Key="ContentsIcon">M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z</StreamGeometry>
   </UserControl.Resources>
 
   <UserControl.Styles>
@@ -24,6 +27,19 @@
       <Setter Property="FontSize" Value="20" />
       <Setter Property="Padding" Value="10,2" />
     </Style>
+
+    <!-- One line of the Contents list: full-width, left-aligned, flat; the chapter being read is emboldened. -->
+    <Style Selector="Button.contents">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Padding" Value="8,6" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+    </Style>
+    <Style Selector="Button.contents.current TextBlock">
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
   </UserControl.Styles>
 
   <Panel>
@@ -34,7 +50,7 @@
       <!-- Centered, justified column with a comfortable measure. The inset is a margin on the text; the top
            inset clears the floating toolbar. The paginator subtracts these to know the space the text gets. -->
       <controls:LinkableTextBlock Name="PageText" Text="{Binding VisiblePageText}"
-                           Links="{Binding VisibleLinks}" LinksEnabled="{Binding !ShowingTranslation}"
+                           Links="{Binding VisibleLinks}"
                            FlowDirection="{Binding ReadingFlowDirection}"
                            AutomationProperties.Name="Page text"
                            TextWrapping="Wrap" TextAlignment="Justify"
@@ -96,6 +112,40 @@
         </StackPanel>
 
         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+          <!-- Table of contents. Entries read in whichever language the page is in; picking one jumps
+               through the same anchor table as an internal link, so ↩ Back returns from it. -->
+          <Button Name="ContentsButton" Classes="tool" Padding="8,6"
+                  IsVisible="{Binding HasContents}" ToolTip.Tip="Contents"
+                  AutomationProperties.Name="Contents">
+            <Viewbox Width="19" Height="19">
+              <Panel Width="24" Height="24">
+                <Path Data="{StaticResource ContentsIcon}"
+                      Fill="{DynamicResource SystemControlForegroundBaseHighBrush}" />
+              </Panel>
+            </Viewbox>
+            <Button.Flyout>
+              <Flyout Placement="Bottom">
+                <Grid RowDefinitions="Auto,*" Width="330" MaxHeight="460">
+                  <TextBlock Grid.Row="0" Text="Contents" FontWeight="SemiBold"
+                             HorizontalAlignment="Center" Margin="0,2,0,8" />
+                  <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
+                    <ItemsControl ItemsSource="{Binding Contents}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ReaderViewModel+ContentsItem">
+                          <Button Classes="contents" Classes.current="{Binding IsCurrent}"
+                                  Command="{Binding $parent[UserControl].((vm:ReaderViewModel)DataContext).GoToContentsEntryCommand}"
+                                  CommandParameter="{Binding TargetKey}">
+                            <TextBlock Text="{Binding Title}" Margin="{Binding Indent}" TextWrapping="Wrap" />
+                          </Button>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+                </Grid>
+              </Flyout>
+            </Button.Flyout>
+          </Button>
+
           <!-- Browser-style Back for a followed internal link; hidden until there is somewhere to return to.
                A distinct return glyph (not the page ‹) so it is not mistaken for Previous page. -->
           <Button Classes="tool nav" Content="↩" Command="{Binding GoBackFromLinkCommand}"

@@ -20,7 +20,10 @@ public static partial class EpubLinkExtractor
 
     public static ExtractedChapter Extract(string? html)
     {
-        if (string.IsNullOrEmpty(html))
+        // A chapter that already uses these private-use scalars (icon fonts do) would be indistinguishable
+        // from our own markers. Refuse it: the empty text can never equal the reader's, so the caller drops
+        // this chapter's links instead of pairing hrefs with the wrong spans.
+        if (string.IsNullOrEmpty(html) || html.AsSpan().IndexOfAny(LinkOpen, LinkClose, AnchorMark) >= 0)
         {
             return new ExtractedChapter(string.Empty, [], []);
         }
@@ -31,10 +34,11 @@ public static partial class EpubLinkExtractor
         var marked = InsertSentinels(html, hrefs, ids);
 
         // 2. Normalize exactly as the reader does (sentinels are PUA scalars: untouched by every step).
-        // A sentinel at the very start/end of the chapter is non-whitespace, so it blocks NormalizeHtml's
-        // own trailing Trim() from removing the whitespace around it (whitespace HtmlToText would have
-        // dropped entirely). Repair that here so a lead/trail-only anchor still matches HtmlToText's text.
-        var normalized = TrimEdgeWhitespaceAroundSentinels(EpubDocumentReader.NormalizeHtml(marked));
+        // Being non-whitespace, a sentinel splits any whitespace run it lands in, so each half collapses on
+        // its own and leaves behind whitespace HtmlToText removes outright. Both repairs below put that back:
+        // one for runs inside the text, one for the edges NormalizeHtml's trailing Trim() would have eaten.
+        var normalized = TrimEdgeWhitespaceAroundSentinels(
+            CollapseWhitespaceRunsAroundSentinels(EpubDocumentReader.NormalizeHtml(marked)));
 
         // 3. Strip sentinels, recording their offsets in the clean text; pair by appearance order.
         var text = new StringBuilder(normalized.Length);
@@ -54,7 +58,10 @@ public static partial class EpubLinkExtractor
                     if (openStack.Count > 0)
                     {
                         var (start, href) = openStack.Pop();
-                        links.Add(new RawLinkSpan(start, text.Length - start, href));
+                        if (text.Length > start) // an <a> whose whole text was whitespace has nothing to click
+                        {
+                            links.Add(new RawLinkSpan(start, text.Length - start, href));
+                        }
                     }
                     break;
                 case AnchorMark:
@@ -72,6 +79,75 @@ public static partial class EpubLinkExtractor
 
         return new ExtractedChapter(text.ToString(), links, anchors);
     }
+
+    /// <summary>Re-collapses every whitespace run a sentinel split in two, to the single space or break
+    /// <see cref="EpubDocumentReader.NormalizeHtml"/> would have produced had the sentinel not been in the
+    /// way. Close sentinels come out ahead of the collapsed whitespace and open/anchor sentinels after it,
+    /// so a link spans exactly its visible text and an anchor points at the first character following it.
+    /// </summary>
+    private static string CollapseWhitespaceRunsAroundSentinels(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        var i = 0;
+        while (i < s.Length)
+        {
+            if (!IsCollapsible(s[i]) && !IsSentinel(s[i]))
+            {
+                sb.Append(s[i++]);
+                continue;
+            }
+
+            var runStart = i;
+            var sentinels = new List<char>();
+            var newlines = 0;
+            var sawWhitespace = false;
+            for (; i < s.Length && (IsCollapsible(s[i]) || IsSentinel(s[i])); i++)
+            {
+                if (IsSentinel(s[i]))
+                {
+                    sentinels.Add(s[i]);
+                }
+                else
+                {
+                    sawWhitespace = true;
+                    newlines += s[i] == '\n' ? 1 : 0;
+                }
+            }
+
+            if (sentinels.Count == 0)
+            {
+                sb.Append(s, runStart, i - runStart); // untouched by a sentinel: already normalized
+                continue;
+            }
+
+            AppendSentinels(sb, sentinels, closes: true);
+            sb.Append(!sawWhitespace ? string.Empty : newlines switch
+            {
+                0 => " ",      // InlineWhitespaceRegex
+                1 => "\n",     // SpacesAroundNewlineRegex
+                _ => "\n\n",   // ExcessNewlinesRegex
+            });
+            AppendSentinels(sb, sentinels, closes: false);
+        }
+
+        return sb.ToString();
+    }
+
+    private static void AppendSentinels(StringBuilder sb, List<char> sentinels, bool closes)
+    {
+        foreach (var sentinel in sentinels)
+        {
+            if ((sentinel == LinkClose) == closes)
+            {
+                sb.Append(sentinel);
+            }
+        }
+    }
+
+    /// <summary>Whitespace <see cref="EpubDocumentReader.NormalizeHtml"/> collapses. Deliberately narrower
+    /// than <see cref="char.IsWhiteSpace(char)"/>: its regexes leave NBSP (common in EPUB prose) alone, so
+    /// treating NBSP as collapsible here would delete characters the reader's own text keeps.</summary>
+    private static bool IsCollapsible(char c) => c is ' ' or '\t' or '\f' or '\v' or '\n';
 
     /// <summary>Removes whitespace that sits between a string edge and a sentinel, mirroring what
     /// <c>string.Trim()</c> would have done had the (non-whitespace) sentinel not been there to block it.

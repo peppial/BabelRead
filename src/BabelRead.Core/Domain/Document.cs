@@ -19,7 +19,8 @@ public sealed class Document
         LanguageCode detectedSourceLanguage,
         IReadOnlyList<string>? segments = null,
         IReadOnlyList<DocumentLink>? links = null,
-        IReadOnlyDictionary<string, LinkTarget>? anchors = null)
+        IReadOnlyDictionary<string, LinkTarget>? anchors = null,
+        IReadOnlyList<ContentsEntry>? contents = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentOutOfRangeException.ThrowIfNegative(pageCount);
@@ -32,6 +33,7 @@ public sealed class Document
         Segments = segments ?? [];
         Links = links ?? [];
         Anchors = anchors ?? new Dictionary<string, LinkTarget>();
+        Contents = contents ?? [];
     }
 
     /// <summary>Stable identity for this source document (derived from path); part of translation-cache keys.</summary>
@@ -60,4 +62,9 @@ public sealed class Document
     /// <summary>Resolvable link destinations, keyed by an internal anchor/file identity (EPUB only;
     /// empty for PDF). Populated for every chapter, not only ones a link points at.</summary>
     public IReadOnlyDictionary<string, LinkTarget> Anchors { get; }
+
+    /// <summary>The book's table of contents in reading order, flattened with each entry's nesting depth
+    /// (EPUB only; empty for PDF). Every entry's <see cref="ContentsEntry.TargetKey"/> is guaranteed to
+    /// exist in <see cref="Anchors"/>.</summary>
+    public IReadOnlyList<ContentsEntry> Contents { get; }
 }

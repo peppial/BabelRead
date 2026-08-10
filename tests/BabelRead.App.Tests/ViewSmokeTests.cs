@@ -2,7 +2,9 @@ using Avalonia;
 using Avalonia.Threading;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
+using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
+using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.VisualTree;
 using BabelRead.App.Controls;
@@ -125,7 +127,7 @@ public class ViewSmokeTests
     }
 
     [AvaloniaFact]
-    public void Original_view_renders_a_clickable_link_run_translation_view_does_not()
+    public void The_reader_renders_a_link_run_and_falls_back_to_plain_text_without_one()
     {
         var store = new InMemoryTranslationStore();
         var vm = new ReaderViewModel(
@@ -147,10 +149,110 @@ public class ViewSmokeTests
         var page = view.GetVisualDescendants().OfType<LinkableTextBlock>().Single();
         Assert.Contains(page.Inlines!, i => i is Run r && r.TextDecorations == TextDecorations.Underline);
 
-        page.LinksEnabled = false; // translation view
+        vm.VisibleLinks = []; // a page the view-model could place no link on
         Dispatcher.UIThread.RunJobs();
         Assert.DoesNotContain(page.Inlines!, i => i is Run r && r.TextDecorations == TextDecorations.Underline);
         Assert.Equal("See the note here.", page.Text); // plain path still renders the text
+    }
+
+    [AvaloniaFact]
+    public void Clicking_a_link_run_in_the_reader_invokes_that_link()
+    {
+        var store = new InMemoryTranslationStore();
+        var vm = new ReaderViewModel(
+            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
+            new TranslationService(new StubChatClientFactory(new FakeChatClient()), store),
+            store,
+            new NoOpPrefetchCoordinator(),
+            new JsonPreferencesStore(Path.Combine(Path.GetTempPath(), $"{System.Guid.NewGuid():n}.json")));
+        vm.ShowingTranslation = false;
+        vm.VisiblePageText = "See the note here.";
+        vm.VisibleLinks = new[] { new ReaderViewModel.VisibleLink(8, 4, "ch2.xhtml#note") };
+        vm.State = ReaderState.Content; // the reading surface is only shown (and hit-testable) with content
+
+        var view = new ReaderView { DataContext = vm };
+        var window = new Window { Content = view, Width = 800, Height = 900 };
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        var page = view.GetVisualDescendants().OfType<LinkableTextBlock>().Single();
+        string? invoked = null;
+        page.LinkInvoked += (_, key) => invoked = key;
+
+        // Click the middle of the "note" run. The control has to be hit-testable for the press to reach it
+        // at all -- a text block with no Background lets pointer events straight through.
+        var glyph = page.TextLayout.HitTestTextPosition(9);
+        var point = page.TranslatePoint(glyph.Center, window)!.Value;
+        window.MouseDown(point, MouseButton.Left);
+        window.MouseUp(point, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Equal("ch2.xhtml#note", invoked);
+    }
+
+    [AvaloniaFact]
+    public void Clicking_plain_text_away_from_a_link_invokes_nothing()
+    {
+        var store = new InMemoryTranslationStore();
+        var vm = new ReaderViewModel(
+            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
+            new TranslationService(new StubChatClientFactory(new FakeChatClient()), store),
+            store,
+            new NoOpPrefetchCoordinator(),
+            new JsonPreferencesStore(Path.Combine(Path.GetTempPath(), $"{System.Guid.NewGuid():n}.json")));
+        vm.ShowingTranslation = false;
+        vm.VisiblePageText = "See the note here.";
+        vm.VisibleLinks = new[] { new ReaderViewModel.VisibleLink(8, 4, "ch2.xhtml#note") };
+        vm.State = ReaderState.Content; // the reading surface is only shown (and hit-testable) with content
+
+        var view = new ReaderView { DataContext = vm };
+        var window = new Window { Content = view, Width = 800, Height = 900 };
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        var page = view.GetVisualDescendants().OfType<LinkableTextBlock>().Single();
+        string? invoked = null;
+        page.LinkInvoked += (_, key) => invoked = key;
+
+        var glyph = page.TextLayout.HitTestTextPosition(1); // inside "See", outside every link run
+        var point = page.TranslatePoint(glyph.Center, window)!.Value;
+        window.MouseDown(point, MouseButton.Left);
+        window.MouseUp(point, MouseButton.Left);
+        Dispatcher.UIThread.RunJobs();
+
+        Assert.Null(invoked);
+    }
+
+    [AvaloniaFact]
+    public void The_pointer_becomes_a_hand_over_a_link_and_reverts_off_it()
+    {
+        var store = new InMemoryTranslationStore();
+        var vm = new ReaderViewModel(
+            new DocumentReaderRegistry(new IDocumentReader[] { new PdfDocumentReader() }),
+            new TranslationService(new StubChatClientFactory(new FakeChatClient()), store),
+            store,
+            new NoOpPrefetchCoordinator(),
+            new JsonPreferencesStore(Path.Combine(Path.GetTempPath(), $"{System.Guid.NewGuid():n}.json")));
+        vm.ShowingTranslation = false;
+        vm.VisiblePageText = "See the note here.";
+        vm.VisibleLinks = new[] { new ReaderViewModel.VisibleLink(8, 4, "ch2.xhtml#note") };
+        vm.State = ReaderState.Content;
+
+        var view = new ReaderView { DataContext = vm };
+        var window = new Window { Content = view, Width = 800, Height = 900 };
+        window.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        var page = view.GetVisualDescendants().OfType<LinkableTextBlock>().Single();
+        var offLink = page.Cursor;
+
+        window.MouseMove(page.TranslatePoint(page.TextLayout.HitTestTextPosition(9).Center, window)!.Value);
+        Dispatcher.UIThread.RunJobs();
+        Assert.Equal(new Cursor(StandardCursorType.Hand).ToString(), page.Cursor?.ToString());
+
+        window.MouseMove(page.TranslatePoint(page.TextLayout.HitTestTextPosition(1).Center, window)!.Value);
+        Dispatcher.UIThread.RunJobs();
+        Assert.Equal(offLink, page.Cursor); // plain text keeps the selectable-text cursor
     }
 
     private sealed class EmptyOllamaCatalog : IOllamaModelCatalog

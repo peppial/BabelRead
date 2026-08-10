@@ -690,14 +690,137 @@ public sealed class ReaderViewModelTests : IDisposable
     }
 
     [AvaloniaFact]
-    public async Task Links_are_not_exposed_while_reading_the_translation()
+    public async Task A_link_on_its_own_line_is_followable_in_the_translation_too()
     {
         var vm = CreateViewModel();
+        await vm.SetTargetLanguageAsync(new LanguageCode("bg")); // the fixtures are in English: translate them
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithWholeLineLink(Path.Combine(_dir, "menu.epub")));
+        SetMetrics(vm);
+        vm.ShowingTranslation = true;
+        await PageForwardUntilVisibleAsync(vm, "The note");
+
+        // The fake translator prefixes "[translated] ", so the flow really is holding translated text and
+        // the link's stored offsets (measured against the original) no longer describe what is on screen.
+        Assert.Contains("[translated]", vm.DisplayText!, StringComparison.Ordinal);
+        var link = Assert.Single(vm.VisibleLinks);
+        Assert.Equal("The note", vm.VisiblePageText!.Substring(link.Start, link.Length));
+
+        await vm.FollowLinkAsync(link.TargetKey); // and it still navigates from the translation
+        Assert.True(vm.CanGoBackFromLink);
+    }
+
+    [AvaloniaFact]
+    public async Task The_contents_reads_in_whichever_language_the_page_is_in()
+    {
+        var vm = CreateViewModel();
+        await vm.SetTargetLanguageAsync(new LanguageCode("bg"));
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithNestedContents(Path.Combine(_dir, "nested.epub")));
+        SetMetrics(vm);
+
+        // Before the list is ever opened nothing has been spent on it, so it reads in the original.
+        vm.ShowingTranslation = true;
+        Assert.Equal(["Leaders", "Britain", "Culture"], vm.Contents.Select(c => c.Title));
+
+        await vm.PrepareContentsAsync();
+        // The fake prefixes the block it is handed, so only the first line carries the marker -- which is
+        // exactly what proves the three titles travelled as one block and were read back line per title.
+        Assert.Equal(["[translated] Leaders", "Britain", "Culture"], vm.Contents.Select(c => c.Title));
+
+        vm.ShowingTranslation = false; // reading the original: the contents follows it back
+        Assert.Equal(["Leaders", "Britain", "Culture"], vm.Contents.Select(c => c.Title));
+    }
+
+    [AvaloniaFact]
+    public async Task Contents_titles_are_translated_in_batches_and_only_once()
+    {
+        var vm = CreateViewModel();
+        await vm.SetTargetLanguageAsync(new LanguageCode("bg"));
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithNestedContents(Path.Combine(_dir, "batched.epub")));
+        SetMetrics(vm);
+        vm.ShowingTranslation = true;
+        var before = _fake.CallCount;
+
+        await vm.PrepareContentsAsync();
+        var spent = _fake.CallCount - before;
+
+        // Three titles, one call: they travel as a single block, not one request each.
+        Assert.Equal(1, spent);
+
+        await vm.PrepareContentsAsync(); // opening the list again is free
+        Assert.Equal(spent, _fake.CallCount - before);
+    }
+
+    [AvaloniaFact]
+    public async Task Choosing_a_contents_entry_jumps_to_that_chapter_and_can_be_undone()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithNestedContents(Path.Combine(_dir, "jump.epub")));
+        SetMetrics(vm);
+        vm.ShowingTranslation = false;
+        var before = vm.VisiblePageText;
+        var beforePage = vm.PageNumber;
+
+        await vm.GoToContentsEntryAsync(vm.Contents[^1].TargetKey); // the last chapter
+
+        // It lands on that chapter's opening paragraph, with the chapter's own text a turn or two away.
+        // (Headless text measurement fits about a line per visual page, hence the turns; from the start of
+        // the book "Culture" is a dozen pages off, so reaching it in three proves where the jump landed.)
+        Assert.True(vm.PageNumber > beforePage, $"expected a jump forward, stayed on page {vm.PageNumber}");
+        for (var turns = 0; turns < 3 && vm.VisiblePageText?.Contains("Culture", StringComparison.Ordinal) != true; turns++)
+        {
+            await vm.NextPageAsync();
+        }
+
+        Assert.Contains("Culture", vm.VisiblePageText!, StringComparison.Ordinal);
+
+        // A contents jump is a link jump: the same Back returns from it.
+        Assert.True(vm.CanGoBackFromLink);
+        await vm.GoBackFromLinkAsync();
+        Assert.Equal(before, vm.VisiblePageText);
+    }
+
+    [AvaloniaFact]
+    public async Task The_contents_marks_the_chapter_being_read()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(SampleDocuments.CreateEpubWithNestedContents(Path.Combine(_dir, "current.epub")));
+        SetMetrics(vm);
+        vm.ShowingTranslation = false;
+
+        await vm.PrepareContentsAsync();
+        Assert.Equal("Leaders", vm.Contents.Single(c => c.IsCurrent).Title);
+
+        await vm.GoToContentsEntryAsync(vm.Contents[^1].TargetKey);
+        await vm.PrepareContentsAsync();
+        Assert.Equal("Culture", vm.Contents.Single(c => c.IsCurrent).Title);
+    }
+
+    [AvaloniaFact]
+    public async Task A_pdf_offers_no_contents_button()
+    {
+        var vm = CreateViewModel();
+        await vm.OpenAsync(CreatePdf("Bonjour le monde"));
+        SetMetrics(vm);
+
+        Assert.Empty(vm.Contents);
+        Assert.False(vm.HasContents);
+    }
+
+    [AvaloniaFact]
+    public async Task A_link_inside_a_sentence_is_left_out_of_the_translation()
+    {
+        // Word order moves under translation, so there is no telling which words carry the link. It stays
+        // followable in the original, where the offsets still hold.
+        var vm = CreateViewModel();
+        await vm.SetTargetLanguageAsync(new LanguageCode("bg"));
         await vm.OpenAsync(SampleDocuments.CreateEpubWithInternalLink(Path.Combine(_dir, "linked.epub")));
         SetMetrics(vm);
 
         vm.ShowingTranslation = true;
+        await PageForwardUntilVisibleAsync(vm, "the note");
+        Assert.Contains("[translated]", vm.DisplayText!, StringComparison.Ordinal);
         Assert.Empty(vm.VisibleLinks);
+
         vm.ShowingTranslation = false;
         await PageForwardUntilLinkVisibleAsync(vm);
         Assert.NotEmpty(vm.VisibleLinks);

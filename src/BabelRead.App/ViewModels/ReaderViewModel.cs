@@ -25,6 +25,9 @@ public sealed partial class ReaderViewModel : ObservableObject
     private const double BaselineLayoutWidth = 1280;
     private const double BaselineLayoutHeight = 800;
 
+    /// <summary>Blank line the flow puts between paragraphs, so each one reads as its own block.</summary>
+    private const string ParagraphJoin = "\n\n";
+
     private readonly DocumentReaderRegistry _readers;
     private readonly ITranslationService _translation;
     private readonly ITranslationStore _store;
@@ -55,11 +58,18 @@ public sealed partial class ReaderViewModel : ObservableObject
     private int _pageStartOffset;
     private readonly Stack<int> _visitedPageStarts = new();  // page starts we can pop straight back to
 
-    // Internal hyperlinks (EPUB only; empty for PDF): followed in the original view, with a browser-style
-    // Back stack separate from ordinary page navigation.
-    private IReadOnlyList<DocumentLink> _links = [];
+    // Internal hyperlinks (EPUB only; empty for PDF), grouped by the paragraph holding them: locating them
+    // on screen is per-paragraph work in the translation view. Following one uses a browser-style Back
+    // stack separate from ordinary page navigation.
+    private IReadOnlyDictionary<int, IReadOnlyList<DocumentLink>> _linksBySegment =
+        new Dictionary<int, IReadOnlyList<DocumentLink>>();
     private IReadOnlyDictionary<string, LinkTarget> _anchors = new Dictionary<string, LinkTarget>();
     private readonly Stack<int> _linkReturnStack = new();
+
+    // The book's table of contents, and the batches its titles are translated in.
+    private IReadOnlyList<ContentsEntry> _contentsEntries = [];
+    private IReadOnlyList<ContentsTitleBatch> _contentsBatches = [];
+    private bool _translatingContents;
 
     [ObservableProperty]
     private string _title = "BabelRead";
@@ -179,6 +189,18 @@ public sealed partial class ReaderViewModel : ObservableObject
 
     /// <summary>An internal hyperlink located within the current visual page, in page-relative coordinates.</summary>
     public readonly record struct VisibleLink(int Start, int Length, string TargetKey);
+
+    /// <summary>One line of the Contents list: its title in the language being read, how far to indent it,
+    /// and whether it is the chapter the reader is currently in.</summary>
+    public sealed record ContentsItem(string Title, string TargetKey, Avalonia.Thickness Indent, bool IsCurrent);
+
+    /// <summary>The book's table of contents, titles in the language currently being read.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasContents))]
+    private IReadOnlyList<ContentsItem> _contents = [];
+
+    /// <summary>Whether this document offers a table of contents at all (EPUBs generally do; PDFs do not).</summary>
+    public bool HasContents => Contents.Count > 0;
 
     /// <summary>Right-to-left when showing a translation into an RTL language (Arabic, Hebrew, ...).</summary>
     public Avalonia.Media.FlowDirection ReadingFlowDirection =>
@@ -367,10 +389,15 @@ public sealed partial class ReaderViewModel : ObservableObject
             _document = await _reader.OpenAsync(path, CancellationToken.None).ConfigureAwait(true);
             Title = _document.Title;
             PageCount = _document.PageCount;
-            _links = _document.Links;
+            _linksBySegment = _document.Links
+                .GroupBy(link => link.SegmentIndex)
+                .ToDictionary(g => g.Key, g => (IReadOnlyList<DocumentLink>)g.ToArray());
             _anchors = _document.Anchors;
             _linkReturnStack.Clear();
             CanGoBackFromLink = false;
+            _contentsEntries = _document.Contents;
+            _contentsBatches = ContentsTitles.Batch(_contentsEntries.Select(e => e.Title).ToArray());
+            RebuildContents();
             await _store.OpenAsync(_document.Id).ConfigureAwait(true); // everything this book has ever had translated
             var prefs = await UpdatePreferencesAsync(p => p.LastOpenedDocumentPath = path).ConfigureAwait(true);
             _sourceOverride = LanguageResolver.GetOverride(prefs, _document.Id);
@@ -511,6 +538,131 @@ public sealed partial class ReaderViewModel : ObservableObject
         await OnVisualPageChangedAsync(ReadingDirection.Forward).ConfigureAwait(true);
     }
 
+    /// <summary>Jump to a table-of-contents entry. It travels the same road as an internal hyperlink — same
+    /// anchor table, same Back stack — so returning from a chapter jump works like returning from a link.</summary>
+    [RelayCommand]
+    public Task GoToContentsEntryAsync(string? targetKey) =>
+        string.IsNullOrEmpty(targetKey) ? Task.CompletedTask : FollowLinkAsync(targetKey);
+
+    /// <summary>Called as the Contents list is opened. In the translation view this is where its titles are
+    /// translated — a few batched calls, cached from then on — so a reader who never opens the list is never
+    /// charged for it. The list shows the original titles until the translation lands.</summary>
+    public async Task PrepareContentsAsync()
+    {
+        RebuildContents(); // show what we have (originals, or an earlier translation) straight away
+        if (!ShowingTranslation || _document is null || _contentsBatches.Count == 0 || _translatingContents)
+        {
+            return;
+        }
+
+        _translatingContents = true;
+        try
+        {
+            foreach (var batch in _contentsBatches)
+            {
+                if (_store.TryGet(TranslationKey.For(batch.Text, ResolvedSource, _target, _model.ModelId), out _))
+                {
+                    continue; // already translated in an earlier session
+                }
+
+                await _translation.TranslateAsync(
+                    _document,
+                    new Page(0, [batch.Text]),
+                    _target,
+                    _sourceOverride,
+                    _model,
+                    TranslationOrigin.OnDemand,
+                    CancellationToken.None).ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            _translatingContents = false;
+        }
+
+        RebuildContents();
+    }
+
+    /// <summary>Rebuilds <see cref="Contents"/> in the language being read, marking the entry the reader is
+    /// currently inside.</summary>
+    private void RebuildContents()
+    {
+        if (_contentsEntries.Count == 0)
+        {
+            Contents = [];
+            return;
+        }
+
+        var titles = ContentsTitlesInReadingLanguage();
+        var current = CurrentContentsIndex();
+        var items = new List<ContentsItem>(_contentsEntries.Count);
+        for (var i = 0; i < _contentsEntries.Count; i++)
+        {
+            var entry = _contentsEntries[i];
+            items.Add(new ContentsItem(
+                titles[i],
+                entry.TargetKey,
+                new Avalonia.Thickness(Math.Min(entry.Depth, 3) * 16, 0, 0, 0),
+                i == current));
+        }
+
+        Contents = items;
+    }
+
+    /// <summary>The contents titles as they should read right now: the original text in the original view,
+    /// and in the translation view whatever batches the store already holds — falling back to the original
+    /// for any batch that is missing or that came back reshaped.</summary>
+    private string[] ContentsTitlesInReadingLanguage()
+    {
+        var titles = _contentsEntries.Select(e => e.Title).ToArray();
+        if (!ShowingTranslation)
+        {
+            return titles;
+        }
+
+        foreach (var batch in _contentsBatches)
+        {
+            if (!_store.TryGet(TranslationKey.For(batch.Text, ResolvedSource, _target, _model.ModelId), out var translated))
+            {
+                continue;
+            }
+
+            if (ContentsTitles.Unbatch(translated, batch.Count) is not { } lines)
+            {
+                continue; // the model reshaped the block: this batch keeps its original titles
+            }
+
+            for (var i = 0; i < lines.Count; i++)
+            {
+                titles[batch.FirstIndex + i] = lines[i];
+            }
+        }
+
+        return titles;
+    }
+
+    /// <summary>Index of the last contents entry at or before the paragraph on screen — the chapter the
+    /// reader is currently inside — or -1 when they are ahead of the first entry.</summary>
+    private int CurrentContentsIndex()
+    {
+        if (_segmentCharOffsets.Length == 0)
+        {
+            return -1;
+        }
+
+        var currentSegment = SegmentIndexAtOffset(_pageStartOffset);
+        var current = -1;
+        for (var i = 0; i < _contentsEntries.Count; i++)
+        {
+            if (_anchors.TryGetValue(_contentsEntries[i].TargetKey, out var target) && target.SegmentIndex <= currentSegment)
+            {
+                current = i;
+            }
+        }
+
+        return current;
+    }
+
     /// <summary>Browser-style Back for link jumps: returns to the page start recorded before the most
     /// recent <see cref="FollowLinkAsync"/>.</summary>
     [RelayCommand]
@@ -547,11 +699,11 @@ public sealed partial class ReaderViewModel : ObservableObject
     }
 
     /// <summary>Recomputes <see cref="VisibleLinks"/> from the links whose flow range intersects the current
-    /// visual page. Links are followable in the original view only.</summary>
+    /// visual page. Only the paragraphs actually on screen are placed, since placing one in the translation
+    /// view means matching it up against the translated text.</summary>
     private void RebuildVisibleLinks()
     {
-        if (ShowingTranslation || _metrics is null || _links.Count == 0
-            || VisiblePageText is not { Length: > 0 } visible)
+        if (_metrics is null || _linksBySegment.Count == 0 || VisiblePageText is not { Length: > 0 } visible)
         {
             VisibleLinks = [];
             return;
@@ -560,27 +712,76 @@ public sealed partial class ReaderViewModel : ObservableObject
         var pageStart = _pageStartOffset;
         var pageEnd = pageStart + visible.Length;
         var result = new List<VisibleLink>();
-        foreach (var link in _links)
+        foreach (var (segmentIndex, segmentLinks) in _linksBySegment)
         {
-            if (link.SegmentIndex < 0 || link.SegmentIndex >= _segmentCharOffsets.Length)
+            if (segmentIndex < 0 || segmentIndex >= _segmentCharOffsets.Length)
             {
                 continue; // stale reference from a differently-segmented document (shouldn't happen)
             }
 
-            var flowStart = _segmentCharOffsets[link.SegmentIndex] + link.Start;
-            var flowEnd = flowStart + link.Length;
-            var overlapStart = Math.Max(flowStart, pageStart);
-            var overlapEnd = Math.Min(flowEnd, pageEnd);
-            if (overlapEnd <= overlapStart)
+            var segmentStart = _segmentCharOffsets[segmentIndex];
+            if (SegmentEnd(segmentIndex) <= pageStart || segmentStart >= pageEnd)
             {
-                continue; // not on this visual page
+                continue; // this paragraph is off screen
             }
 
-            result.Add(new VisibleLink(overlapStart - pageStart, overlapEnd - overlapStart, link.TargetKey));
+            foreach (var (link, start, length) in PlaceLinks(segmentIndex, segmentLinks))
+            {
+                var flowStart = segmentStart + start;
+                var overlapStart = Math.Max(flowStart, pageStart);
+                var overlapEnd = Math.Min(flowStart + length, pageEnd);
+                if (overlapEnd <= overlapStart)
+                {
+                    continue; // not on this visual page
+                }
+
+                result.Add(new VisibleLink(overlapStart - pageStart, overlapEnd - overlapStart, link.TargetKey));
+            }
         }
 
+        result.Sort((a, b) => a.Start.CompareTo(b.Start));
         VisibleLinks = result;
     }
+
+    /// <summary>Where each of a paragraph's links sits in the text currently on screen. A link's stored
+    /// offsets describe the ORIGINAL paragraph, so they hold as they are whenever that is what the flow
+    /// shows — the original view, and any paragraph not translated yet. Against a translation they are
+    /// meaningless, and <see cref="TranslatedLinkMapper"/> relocates the ones it can place; the rest are
+    /// left out rather than drawn over whichever words happen to sit at those offsets.</summary>
+    private IEnumerable<(DocumentLink Link, int Start, int Length)> PlaceLinks(
+        int segmentIndex, IReadOnlyList<DocumentLink> links)
+    {
+        var displayed = DisplayedSegmentText(segmentIndex);
+        var original = segmentIndex < _orderedSegments.Count ? _orderedSegments[segmentIndex] : displayed;
+        if (string.Equals(displayed, original, StringComparison.Ordinal))
+        {
+            foreach (var link in links)
+            {
+                yield return (link, link.Start, link.Length);
+            }
+
+            yield break;
+        }
+
+        var mapped = TranslatedLinkMapper.Map(original, displayed, links.Select(l => (l.Start, l.Length)).ToArray());
+        for (var i = 0; i < links.Count; i++)
+        {
+            if (mapped[i] is { } range)
+            {
+                yield return (links[i], range.Start, range.Length);
+            }
+        }
+    }
+
+    /// <summary>The paragraph's text as the flow currently holds it — its translation, or its original.</summary>
+    private string DisplayedSegmentText(int segmentIndex) =>
+        DisplayText is { } text ? text[_segmentCharOffsets[segmentIndex]..SegmentEnd(segmentIndex)] : string.Empty;
+
+    /// <summary>End of a paragraph's own text in the flow, excluding the blank line joining it to the next.</summary>
+    private int SegmentEnd(int segmentIndex) =>
+        segmentIndex + 1 < _segmentCharOffsets.Length
+            ? Math.Max(_segmentCharOffsets[segmentIndex], _segmentCharOffsets[segmentIndex + 1] - ParagraphJoin.Length)
+            : DisplayText?.Length ?? _segmentCharOffsets[segmentIndex];
 
     [RelayCommand]
     public void ToggleView() => ShowingTranslation = !ShowingTranslation;
@@ -916,7 +1117,7 @@ public sealed partial class ReaderViewModel : ObservableObject
 
             if (i < _orderedSegments.Count - 1)
             {
-                builder.Append("\n\n");
+                builder.Append(ParagraphJoin);
             }
         }
 
@@ -1022,6 +1223,7 @@ public sealed partial class ReaderViewModel : ObservableObject
 
     partial void OnShowingTranslationChanged(bool value)
     {
+        RebuildContents(); // the contents list reads in whichever language the page is in
         // Original and translation paginate differently (translated paragraphs are usually longer), so after
         // remapping the reader onto the same passage, refresh the visual page count and nav for the new flow.
         BuildContinuousText();
