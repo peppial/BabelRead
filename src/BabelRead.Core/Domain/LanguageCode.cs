@@ -34,5 +34,19 @@ public readonly record struct LanguageCode(string Code)
         }
     }
 
+    /// <summary>The primary subtag, lowercased (e.g. "pt" for "pt-BR"). Empty when unknown.</summary>
+    public string Primary => IsUnknown ? string.Empty : Code.Split('-')[0].ToLowerInvariant();
+
+    /// <summary>True when both codes share a primary subtag, so "pt" and "pt-BR" match.</summary>
+    public bool MatchesLanguage(LanguageCode other)
+    {
+        if (IsUnknown || other.IsUnknown)
+        {
+            return false;
+        }
+
+        return string.Equals(Primary, other.Primary, StringComparison.Ordinal);
+    }
+
     public override string ToString() => IsUnknown ? "(unknown)" : Code;
 }
