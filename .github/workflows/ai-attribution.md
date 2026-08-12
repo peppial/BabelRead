@@ -108,6 +108,10 @@ safe-outputs:
   add-labels:
     allowed: ["ai:none", "ai:low", "ai:medium", "ai:high", "ai:recorded"]
     target: "triggering"
+    # Required on gh-aw v0.85.4: the default issue-intent path sends a PR node
+    # id to updateIssue and dies with "Could not resolve to Issue node".
+    # github/gh-aw#50894. remove-labels is unaffected.
+    issue-intent: false
     max: 2
   remove-labels:
     allowed: ["ai:none", "ai:low", "ai:medium", "ai:high", "ai:recorded"]
