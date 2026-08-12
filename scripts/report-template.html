@@ -1,0 +1,298 @@
+<!--
+  AI code attribution report template.
+  Fill the slots marked {{ }} and delete this comment.
+  No external stylesheets, fonts, scripts or images.
+
+  Slots:
+    {{TITLE}}       e.g. "scaleforce/tixets #1920 — Remove Firebase login logging"
+    {{RECORDED}}    e.g. "0 of 214"  (added lines with provenance on record)
+    {{INFERRED}}    integer percent, e.g. 62
+    {{VERDICT}}     3-8 words
+    {{META}}        e.g. "8 files · +214 / −37 · 3 commits"
+    {{PAINTED_PCT}} percent of scoreable added lines painted
+    {{DIFF}}        the diff, HTML-escaped, one <span class="l"> per line,
+                    separated by LITERAL newlines so stripping tags reproduces it exactly:
+                      <span class="l add t2" data-score="0.55" data-rules="C1, D1"
+                            data-why="..." tabindex="0">+    $x = f();</span>
+                    classes: add | del | ctx | hh   (hh = @@ hunk header, fh = file header)
+                    tiers:   t3 | t2 | t1 | rec     (rec = recorded, no score)
+    {{FINDINGS}}    one <tr> per finding
+    {{EXCLUDED}}    <li> per generated/vendored file skipped, or "" for none
+-->
+<title>{{TITLE}}</title>
+
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --surface: #ffffff;
+    --border: #e3e1dc;
+    --text: #1f1e1c;
+    --muted: #6b6862;
+
+    --t3: #c8362a;
+    --t3-fill: rgba(200, 54, 42, 0.14);
+    --t2: #b4600c;
+    --t2-fill: rgba(180, 96, 12, 0.14);
+    --t1: #8a7410;
+    --t1-fill: rgba(190, 160, 20, 0.16);
+
+    /* Recorded evidence is a different KIND of claim, so it gets a different hue
+       family from the warm inference ramp — not a fourth confidence level. */
+    --rec: #2f6f8f;
+    --rec-fill: rgba(47, 111, 143, 0.13);
+
+    --add: #1f7a3d;
+    --del: #a33a30;
+
+    --tip-bg: #26241f;
+    --tip-text: #f7f6f3;
+
+    --sans: ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171614;
+      --surface: #1e1d1a;
+      --border: #34322d;
+      --text: #ecebe7;
+      --muted: #9b968c;
+
+      --t3: #ff8a7a;
+      --t3-fill: rgba(255, 96, 76, 0.20);
+      --t2: #ffb266;
+      --t2-fill: rgba(255, 150, 50, 0.18);
+      --t1: #e8d06a;
+      --t1-fill: rgba(230, 200, 80, 0.16);
+
+      --rec: #7fc3e3;
+      --rec-fill: rgba(110, 180, 215, 0.18);
+
+      --add: #7ed09a;
+      --del: #ff9c8f;
+
+      --tip-bg: #f3f1ec;
+      --tip-text: #1b1a17;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #171614;
+    --surface: #1e1d1a;
+    --border: #34322d;
+    --text: #ecebe7;
+    --muted: #9b968c;
+
+    --t3: #ff8a7a;
+    --t3-fill: rgba(255, 96, 76, 0.20);
+    --t2: #ffb266;
+    --t2-fill: rgba(255, 150, 50, 0.18);
+    --t1: #e8d06a;
+    --t1-fill: rgba(230, 200, 80, 0.16);
+
+    --rec: #7fc3e3;
+    --rec-fill: rgba(110, 180, 215, 0.18);
+
+    --add: #7ed09a;
+    --del: #ff9c8f;
+
+    --tip-bg: #f3f1ec;
+    --tip-text: #1b1a17;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 var(--sans);
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+    overflow-x: hidden;
+  }
+
+  main { max-width: 62rem; margin: 0 auto; }
+
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 1.5rem; letter-spacing: -0.01em; }
+
+  /* ---------- two-lane header ---------- */
+
+  .lanes {
+    display: grid; gap: 1px; background: var(--border);
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .lane { background: var(--surface); padding: 1rem 1.15rem; }
+  .lane .k {
+    font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em;
+    font-weight: 600; color: var(--muted);
+  }
+  .lane .v {
+    font-size: 2.1rem; font-weight: 650; line-height: 1.2; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; font-family: var(--mono);
+  }
+  .lane.recorded .v { color: var(--rec); }
+  .lane .d { font-size: 0.78rem; color: var(--muted); margin-top: 0.15rem; }
+
+  .verdict { margin: 0.9rem 0 0; font-size: 0.95rem; font-weight: 550; }
+  .meta { font-size: 0.78rem; color: var(--muted); margin: 0.2rem 0 0; font-family: var(--mono); }
+
+  .legend {
+    display: flex; gap: 1.1rem; flex-wrap: wrap;
+    margin: 1.1rem 0 0; font-size: 0.78rem; color: var(--muted);
+  }
+  .legend b { font-weight: 550; color: var(--text); }
+  .swatch {
+    display: inline-block; width: 0.85rem; height: 0.85rem; border-radius: 2px;
+    vertical-align: -1px; margin-right: 0.3rem;
+  }
+  .swatch.s3 { background: var(--t3-fill); border-left: 3px solid var(--t3); }
+  .swatch.s2 { background: var(--t2-fill); border-left: 3px solid var(--t2); }
+  .swatch.s1 { background: var(--t1-fill); border-left: 3px solid var(--t1); }
+  .swatch.sr { background: var(--rec-fill); border-left: 3px solid var(--rec); }
+
+  .caveat {
+    font-size: 0.79rem; color: var(--muted); margin: 0.9rem 0 0;
+    padding: 0.65rem 0.85rem; border-left: 2px solid var(--border);
+    background: var(--surface); border-radius: 0 4px 4px 0;
+  }
+  .caveat b { color: var(--text); }
+
+  /* ---------- diff ---------- */
+
+  h2 { font-size: 0.92rem; font-weight: 600; margin: 2.5rem 0 0.75rem; }
+
+  .diffwrap {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    overflow-x: auto;
+  }
+  pre.diff {
+    margin: 0; padding: 0.9rem 0;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+    tab-size: 4;
+  }
+
+  /* Each line is an inline-block span; literal newlines between them keep the
+     diff byte-exact when tags are stripped. */
+  .l {
+    display: inline-block; min-width: 100%; box-sizing: border-box;
+    padding: 0 0.9rem; border-left: 3px solid transparent;
+    white-space: pre; position: relative; outline: none;
+  }
+  .l.add { color: var(--add); }
+  .l.del { color: var(--del); }
+  .l.ctx { color: var(--muted); }
+  .l.hh  { color: var(--muted); opacity: 0.85; }
+  .l.fh  { color: var(--text); font-weight: 650; }
+
+  /* Tier carried by BOTH fill and border so it survives colour-blindness. */
+  .l.t3  { background: var(--t3-fill); border-left-color: var(--t3); }
+  .l.t2  { background: var(--t2-fill); border-left-color: var(--t2); }
+  .l.t1  { background: var(--t1-fill); border-left-color: var(--t1); }
+  .l.rec { background: var(--rec-fill); border-left-color: var(--rec); }
+
+  .l[data-rules] { cursor: help; }
+  .l:focus-visible { box-shadow: inset 0 0 0 2px var(--text); }
+
+  .l[data-rules]::after {
+    content: attr(data-rules) " · " attr(data-score) " — " attr(data-why);
+    position: absolute; left: 1.5rem; bottom: calc(100% + 4px); z-index: 20;
+    width: max-content; max-width: min(34rem, 72vw);
+    background: var(--tip-bg); color: var(--tip-text);
+    font-family: var(--sans); font-size: 0.76rem; line-height: 1.45; font-weight: 450;
+    white-space: normal; padding: 0.45rem 0.6rem; border-radius: 5px;
+    opacity: 0; visibility: hidden; transition: opacity 0.1s ease;
+    pointer-events: none; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  }
+  .l[data-rules]:hover::after, .l[data-rules]:focus::after { opacity: 1; visibility: visible; }
+
+  /* ---------- findings ---------- */
+
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.83rem; }
+  th, td {
+    text-align: left; padding: 0.5rem 0.75rem 0.5rem 0;
+    border-bottom: 1px solid var(--border); vertical-align: top;
+  }
+  th {
+    font-weight: 550; color: var(--muted); font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  td.c { font-family: var(--mono); font-size: 0.78rem; }
+  td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .pill {
+    display: inline-block; font-family: var(--mono); font-size: 0.7rem; font-weight: 600;
+    padding: 0.1rem 0.4rem; border-radius: 3px; white-space: nowrap;
+  }
+  .pill.t3 { background: var(--t3-fill); color: var(--t3); }
+  .pill.t2 { background: var(--t2-fill); color: var(--t2); }
+  .pill.t1 { background: var(--t1-fill); color: var(--t1); }
+  .pill.rec { background: var(--rec-fill); color: var(--rec); }
+
+  ul.excl { font-size: 0.82rem; color: var(--muted); font-family: var(--mono); padding-left: 1.2rem; }
+  .empty { color: var(--muted); font-size: 0.88rem; }
+</style>
+
+<main>
+  <h1>{{TITLE}}</h1>
+
+  <div class="lanes">
+    <div class="lane recorded">
+      <div class="k">Recorded &middot; fact</div>
+      <div class="v">{{RECORDED}}</div>
+      <div class="d">added lines with provenance on record</div>
+    </div>
+    <div class="lane">
+      <div class="k">Inferred &middot; estimate</div>
+      <div class="v">{{INFERRED}}</div>
+      <div class="d">{{PAINTED_PCT}}% of scoreable added lines painted</div>
+    </div>
+  </div>
+
+  <p class="verdict">{{VERDICT}}</p>
+  <p class="meta">{{META}}</p>
+
+  <div class="legend">
+    <span><i class="swatch sr"></i><b>Recorded</b> on record</span>
+    <span><i class="swatch s3"></i><b>High</b> &ge;&thinsp;0.75</span>
+    <span><i class="swatch s2"></i><b>Medium</b> 0.45&ndash;0.74</span>
+    <span><i class="swatch s1"></i><b>Low</b> 0.20&ndash;0.44</span>
+    <span>hover or tab a line for the rule</span>
+  </div>
+
+  <p class="caveat">
+    <b>The two numbers are different kinds of claim and must not be added.</b>
+    <b>Recorded</b> is fact &mdash; a commit trailer, a bot author, or a provenance note says
+    an agent wrote those lines. <b>Inferred</b> is a guess from code style, and style is weak
+    evidence: a thorough developer, a house lint rule, a formatter in CI, or a squash merge
+    all produce the same signals. A recorded count of zero means <em>no record exists</em>,
+    not that a human wrote it &mdash; nobody on this team has provenance capture installed.
+    Use the inferred lane to decide where to look harder in review. Do not use it as an
+    audit record, and do not use it about a person.
+  </p>
+
+  <h2>Diff</h2>
+  <div class="diffwrap"><pre class="diff">{{DIFF}}</pre></div>
+
+  <h2>Findings</h2>
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr><th>Location</th><th>Score</th><th>Rules</th><th>Why</th></tr>
+      </thead>
+      <tbody>
+        <!-- example row — replace with {{FINDINGS}}
+        <tr>
+          <td class="c">app/Service/Foo.php:41&ndash;58</td>
+          <td class="n"><span class="pill t2">0.55</span></td>
+          <td class="n">C1, D1</td>
+          <td>Comments restate the line below; null guards at 4&times; the file's rate.</td>
+        </tr>
+        -->
+        {{FINDINGS}}
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Excluded from scoring</h2>
+  <ul class="excl">{{EXCLUDED}}</ul>
+</main>

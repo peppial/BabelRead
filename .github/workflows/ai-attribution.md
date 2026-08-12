@@ -15,7 +15,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     forks: "*"
-  schedule: daily
   workflow_dispatch:
   permissions:
     issues: write
@@ -37,9 +36,6 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  # The agent job stays read-only. The code-scanning write happens in the
-  # create-code-scanning-alert safe-output job, under its own scoped token.
-  security-events: read
 
 network: defaults
 
@@ -94,9 +90,6 @@ post-steps:
       if-no-files-found: ignore
 
 safe-outputs:
-  create-code-scanning-alert:
-    driver: "AI Attribution"
-    max: 50
   add-labels:
     allowed: ["ai:none", "ai:low", "ai:medium", "ai:high", "ai:recorded"]
     target: "*"
@@ -225,7 +218,7 @@ Field rules, all mandatory:
 - `lines` is a **0-based inclusive index pair into the raw diff file**, not file line numbers.
   Count lines in `pr.diff` to get them right. A finding out of range aborts the render.
 - `where` is `path:startline-endline` in the **file**, and must be accurate  -  the code
-  scanning alerts in Step 5 are derived from it.
+  painted-line listing in Step 6 is derived from it.
 - `tier` is `t3` (high, >= 0.75), `t2` (medium, 0.45-0.74), `t1` (low, 0.20-0.44), or `rec`
   for recorded evidence. Hunks scoring below 0.20 get no entry at all.
 - `rules` is the comma-separated rule IDs that fired. Never empty.
@@ -233,30 +226,17 @@ Field rules, all mandatory:
 - `inferred` is an integer percentage, or the string `"n/a"` when there are zero scoreable
   added lines.
 
-## Step 5  -  Paint the lines inside the PR
+## Step 5  -  Inline annotations: disabled in this repository
 
-For each painted hunk, emit one `create_code_scanning_alert`. GitHub renders these as
-severity-coloured annotations on the exact lines in the Files-changed tab.
+This repository is private and does not have code scanning enabled, so the
+`create_code_scanning_alert` tool is **not available to you**. Do not attempt to call it.
 
-```json
-{
-  "rule_id": "ai-attribution/high",
-  "message": "Painted high (0.85)  -  C2, D1, N1",
-  "severity": "error",
-  "file_path": "src/auth.ts",
-  "start_line": 41,
-  "description": "Full docblock restating the signature on a file whose other methods carry none; guard density above this file's baseline.\n\nRules: C2 (+0.40), C2 measures divergence from the file's own comment style; D1 (+0.40); N1 (+0.35).\n\nThis is an inferred style signal, not proof of authorship. Thorough, uniform, well-commented code is often just a careful developer."
-}
-```
+The painted lines therefore reach the reviewer through the sticky comment (Step 6) and the
+full painted-diff artifact. Because the comment is the only in-page view of the painted
+lines, it must carry them in full rather than summarising  -  see Step 6.
 
-Severity mapping: `t3` → `error`, `t2` → `warning`, `t1` → `note`, `rec` → `error` with
-`rule_id: ai-attribution/recorded`.
-
-The cap is 50. If more hunks are painted, emit the 50 highest-scoring and record how many
-were omitted  -  Step 6 must state the number and point at the artifact, which has all of them.
-
-If the alert upload fails (fork PRs restrict code scanning), do not fail the run. Say so in
-the comment and rely on the other three surfaces.
+If code scanning is enabled on this repository later, re-add `create-code-scanning-alert` to
+`safe-outputs` and restore this step from the upstream workflow.
 
 ## Step 6  -  Post the sticky comment
 
