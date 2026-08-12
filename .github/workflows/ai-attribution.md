@@ -24,8 +24,18 @@ on:
         GH_TOKEN: ${{ github.token }}
       run: |
         # add-labels cannot create labels and cannot set colours. Do it here.
-        # Never gate activation on this - a repo may withhold issues:write.
-        create() { gh label create "$1" --color "$2" --description "$3" --force || true; }
+        # --repo is required: this job has no checkout, so gh cannot infer the
+        # repository from git and every call fails with "not a git repository".
+        # Never gate activation on this - a repo may withhold issues:write - but
+        # do surface a warning, or a silent failure looks like success.
+        create() {
+          if gh label create "$1" --repo "$GITHUB_REPOSITORY" \
+               --color "$2" --description "$3" --force; then
+            echo "label $1 ok"
+          else
+            echo "::warning::could not create label $1 - create it by hand, see docs/ai-attribution.md"
+          fi
+        }
         create "ai:none"     "0E8A16" "AI attribution: no AI signal in the changed lines"
         create "ai:low"      "FBCA04" "AI attribution: weak AI signal (20-44%)"
         create "ai:medium"   "FB8C00" "AI attribution: moderate AI signal (45-74%)"
