@@ -100,11 +100,9 @@ post-steps:
       if-no-files-found: ignore
 
 safe-outputs:
-  # target: "triggering", not "*". On gh-aw v0.85.4 the "*" path resolves the
-  # target as an Issue node and dies on a PR with "Could not resolve to Issue
-  # node with the global id of 'PR_...'" (github/gh-aw#51124, fixed only in the
-  # v0.86.1+ pre-releases). "triggering" uses the event context and handles PRs
-  # correctly. Safe here because backfill mode is disabled in this repository.
+  # target: "triggering" because backfill mode is disabled in this repository.
+  # Note it is NOT what fixes labelling on pull requests - issue-intent: false
+  # below is. The broken path is chosen by issue-intent, not by target.
   add-labels:
     allowed: ["ai:none", "ai:low", "ai:medium", "ai:high", "ai:recorded"]
     target: "triggering"
