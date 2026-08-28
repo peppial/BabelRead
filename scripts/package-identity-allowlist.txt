@@ -1,0 +1,5 @@
+# Packages accepted despite a package-identity finding.
+# One id per line; everything after '#' is the reason and is printed in the report.
+# An allowlisted package is still reported - it just cannot fail the run.
+#
+# Format:  Some.Package.Id   # why this is fine, and who decided

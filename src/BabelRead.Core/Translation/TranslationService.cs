@@ -114,15 +114,33 @@ public sealed class TranslationService : ITranslationService
 
     private static List<ChatMessage> BuildMessages(string text, LanguageCode source, LanguageCode target)
     {
-        var from = source.IsUnknown ? "the source language" : source.Code;
+        // The page itself is untrusted and stays in its own user message — never concatenated into the
+        // instructions. The language codes are interpolated, and they are untrusted too: the source is
+        // sniffed from document metadata and the target is typed by hand. Both are reduced to the BCP-47
+        // alphabet first, so neither can end the sentence and append instructions of its own.
+        var from = PromptSafeLanguage(source) ?? "the source language";
+        var to = PromptSafeLanguage(target) ?? "the target language";
         var system =
-            $"You are a translation engine. Translate the user's text from {from} into {target.Code}. " +
+            $"You are a translation engine. Translate the user's text from {from} into {to}. " +
             "Preserve meaning, tone, and paragraph breaks. Output only the translated text with no preamble or notes.";
         return
         [
             new ChatMessage(ChatRole.System, system),
             new ChatMessage(ChatRole.User, text),
         ];
+    }
+
+    /// <summary>A language code reduced to what BCP-47 allows (letters, digits, hyphen), or null when
+    /// nothing usable survives.</summary>
+    private static string? PromptSafeLanguage(LanguageCode language)
+    {
+        if (language.IsUnknown)
+        {
+            return null;
+        }
+
+        var safe = string.Concat(language.Code.Where(c => char.IsAsciiLetterOrDigit(c) || c == '-'));
+        return safe.Length is > 0 and <= 35 ? safe : null; // BCP-47 tags are short; anything longer is not one
     }
 
     private static string DescribeFailure(Exception ex) => ex switch

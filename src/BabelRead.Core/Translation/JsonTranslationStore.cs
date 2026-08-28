@@ -41,14 +41,18 @@ public sealed class JsonTranslationStore : ITranslationStore, IAsyncDisposable
         "BabelRead",
         "translations");
 
-    /// <summary>File this document's translations live in — a hash of its id, so any path is a legal name.</summary>
+    /// <summary>File this document's translations live in — a hash of its id, so any path is a legal name.
+    /// The readable prefix is built from an allowlist rather than <see cref="Path.GetInvalidFileNameChars"/>:
+    /// that set is platform-specific (on Unix it is only '/' and NUL), so a Windows-style id such as
+    /// <c>..\..\x</c> would keep its separators and traverse once the same file is written on Windows.</summary>
     public string FilePathFor(string documentId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(documentId);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(documentId.ToLowerInvariant())))[..16].ToLowerInvariant();
         var name = Path.GetFileNameWithoutExtension(documentId);
-        var safe = string.Concat(name.Where(c => !Path.GetInvalidFileNameChars().Contains(c)));
+        var safe = string.Concat(name.Select(c => char.IsLetterOrDigit(c) || c is ' ' or '_' ? c : '-'));
         safe = safe.Length > 60 ? safe[..60] : safe;
+        safe = safe.Trim(' ', '.', '-');
         return Path.Combine(_directory, $"{safe}-{hash}.json".TrimStart('-'));
     }
 

@@ -350,24 +350,16 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
         return fragment.Length > 0 ? $"{targetPath}#{fragment}" : targetPath;
     }
 
-    private static readonly string[] ExternalSchemes = ["http", "https", "mailto", "tel", "data"];
+    /// <summary>Whether an href points outside this document. Internal so the security tests can pin the
+    /// rule directly: anything not classified external here is resolved as a path inside the book, so this
+    /// fails closed — <em>any</em> URI scheme is external, not just the handful we expected to see. An
+    /// allowlist would silently admit <c>javascript:</c>, <c>vbscript:</c> and <c>file:</c> as in-document
+    /// paths.</summary>
+    internal static bool IsExternalHref(string href) =>
+        href.StartsWith("//", StringComparison.Ordinal) || UriSchemeRegex().IsMatch(href);
 
-    private static bool IsExternalHref(string href)
-    {
-        if (href.StartsWith("//", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        var colon = href.IndexOf(':');
-        if (colon <= 0)
-        {
-            return false;
-        }
-
-        var scheme = href[..colon];
-        return ExternalSchemes.Contains(scheme, StringComparer.OrdinalIgnoreCase);
-    }
+    [GeneratedRegex("^[a-zA-Z][a-zA-Z0-9+.-]*:")]
+    private static partial Regex UriSchemeRegex();
 
     private static string GetDirectory(string filePath)
     {
@@ -569,7 +561,7 @@ public sealed partial class EpubDocumentReader : IDocumentReader, IReflowableDoc
         return normalized.Trim();
     }
 
-    [GeneratedRegex("<(script|style)[^>]*>.*?</\\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    [GeneratedRegex("<(script|style)[^>]*>.*?(?:</\\1\\s*>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex ScriptStyleRegex();
 
     [GeneratedRegex("<[^>]+>")]

@@ -53,7 +53,11 @@ public sealed class ModelProfileService
                 continue;
             }
 
-            var mapped = Map(stored);
+            if (Map(stored) is not { } mapped)
+            {
+                continue; // preferences.json is an editable file; a smuggled endpoint is dropped, not honoured
+            }
+
             var existing = _profiles.FindIndex(p => p.ProfileId == mapped.ProfileId);
             if (existing >= 0)
             {
@@ -137,6 +141,7 @@ public sealed class ModelProfileService
     public async Task<ModelProfile> AddCloudProfileAsync(string profileId, string displayName, string modelId, Uri? endpoint, string apiKey, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profileId);
+        ValidateEndpoint(endpoint, profileId);
         var secretRef = await _secrets.SetAsync($"model:{profileId}", apiKey, ct).ConfigureAwait(false);
         var profile = new ModelProfile(profileId, displayName, ModelKind.Cloud, modelId, endpoint, secretRef);
 
@@ -149,6 +154,7 @@ public sealed class ModelProfileService
     /// <summary>Adds (or replaces) a local model profile (no key).</summary>
     public async Task<ModelProfile> AddLocalProfileAsync(string profileId, string displayName, string modelId, Uri endpoint, CancellationToken ct = default)
     {
+        ValidateEndpoint(endpoint, profileId);
         var profile = new ModelProfile(profileId, displayName, ModelKind.Local, modelId, endpoint);
         _profiles.RemoveAll(p => p.ProfileId == profileId);
         _profiles.Add(profile);
@@ -177,12 +183,55 @@ public sealed class ModelProfileService
         await _preferences.SaveAsync(prefs, ct).ConfigureAwait(false);
     }
 
-    private static ModelProfile Map(StoredModelProfile s) =>
-        new(
+    private static ModelProfile? Map(StoredModelProfile s)
+    {
+        Uri? endpoint = null;
+        if (!string.IsNullOrEmpty(s.Endpoint) && !Uri.TryCreate(s.Endpoint, UriKind.Absolute, out endpoint))
+        {
+            return null;
+        }
+
+        if (!IsSafeEndpoint(endpoint))
+        {
+            return null;
+        }
+
+        return new ModelProfile(
             s.ProfileId,
             s.DisplayName,
             s.Kind,
             s.ModelId,
-            string.IsNullOrEmpty(s.Endpoint) ? null : new Uri(s.Endpoint),
+            endpoint,
             string.IsNullOrEmpty(s.CredentialName) ? default : new SecretRef(s.CredentialName));
+    }
+
+    /// <summary>
+    /// An endpoint decides where the reader's API key and every page of their book are sent, so it is
+    /// validated wherever one enters the app — not only at the UI. Only https, or http to loopback, is
+    /// accepted: plaintext http to a remote host puts the key on the wire, and any other scheme hands the
+    /// request to something that is not an OpenAI-compatible HTTP API.
+    /// </summary>
+    internal static bool IsSafeEndpoint(Uri? endpoint)
+    {
+        if (endpoint is null)
+        {
+            return true; // the provider default, which the client resolves over https
+        }
+
+        if (endpoint.Scheme == Uri.UriSchemeHttps)
+        {
+            return true;
+        }
+
+        return endpoint.Scheme == Uri.UriSchemeHttp && endpoint.IsLoopback;
+    }
+
+    private static void ValidateEndpoint(Uri? endpoint, string profileId)
+    {
+        if (!IsSafeEndpoint(endpoint))
+        {
+            throw new ModelConfigurationException(
+                $"Model profile '{profileId}' endpoint '{endpoint}' is not allowed. Use https, or http only to localhost.");
+        }
+    }
 }
