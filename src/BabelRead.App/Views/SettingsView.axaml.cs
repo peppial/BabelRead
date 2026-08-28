@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using BabelRead.App.ViewModels;
+using BabelRead.Core.Models;
 
 namespace BabelRead.App.Views;
 
@@ -45,7 +46,20 @@ public partial class SettingsView : UserControl
 
         Uri? endpoint = Uri.TryCreate(endpointText, UriKind.Absolute, out var uri) ? uri : null;
         var profileId = name.Trim().ToLowerInvariant().Replace(' ', '-');
-        await ViewModel.AddCloudProfileAsync(profileId, name.Trim(), modelId.Trim(), endpoint, apiKey);
+
+        var error = this.FindControl<TextBlock>("CloudError")!;
+        try
+        {
+            await ViewModel.AddCloudProfileAsync(profileId, name.Trim(), modelId.Trim(), endpoint, apiKey);
+            error.IsVisible = false;
+        }
+        catch (ModelConfigurationException ex)
+        {
+            // The endpoint is typed by the reader and rejected if it would expose their key. This is an
+            // async void handler, so letting that escape would take the app down over a typo.
+            error.Text = ex.Message;
+            error.IsVisible = true;
+        }
     }
 
     private async void OnApplyTarget(object? sender, RoutedEventArgs e)

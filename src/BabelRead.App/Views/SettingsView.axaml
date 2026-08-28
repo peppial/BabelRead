@@ -69,6 +69,9 @@
           <TextBox Name="CloudApiKey" PlaceholderText="API key" PasswordChar="•" />
           <Button Name="AddCloudButton" Content="Add cloud model"
                   AutomationProperties.Name="Add the cloud model" />
+          <TextBlock Name="CloudError" TextWrapping="Wrap" IsVisible="False"
+                     Foreground="{DynamicResource SystemFillColorCriticalBrush}"
+                     AutomationProperties.Name="Cloud model error" />
         </StackPanel>
       </Expander>
     </StackPanel>

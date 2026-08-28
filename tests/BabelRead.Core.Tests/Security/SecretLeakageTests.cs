@@ -12,7 +12,7 @@ namespace BabelRead.Core.Tests.Security;
 [Trait("Category", "Security")]
 public sealed class SecretLeakageTests : IDisposable
 {
-    private const string ApiKey = "sk-live-DO-NOT-PERSIST-8f3a91c2e7b45d06";
+    private const string ApiKey = "FAKE-TEST-CREDENTIAL-not-a-real-key-9c1e";
 
     private readonly string _dir = Directory.CreateTempSubdirectory("babelread-security").FullName;
 
@@ -45,8 +45,8 @@ public sealed class SecretLeakageTests : IDisposable
         // A JSON serializer could escape the key rather than omit it; check the bytes, not the string.
         Assert.DoesNotContain(ApiKey, Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
         Assert.DoesNotContain(Convert.ToBase64String(Encoding.UTF8.GetBytes(ApiKey)), Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
-        // The key's distinctive middle, in case escaping broke it across the '-' boundaries.
-        Assert.DoesNotContain("8f3a91c2e7b45d06", Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+        // The distinctive tail, in case escaping broke the value across the '-' boundaries.
+        Assert.DoesNotContain("not-a-real-key-9c1e", Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
     }
 
     [Fact]

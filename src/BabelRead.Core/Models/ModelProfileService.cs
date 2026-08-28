@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using BabelRead.Core.Domain;
 using BabelRead.Core.Preferences;
 
@@ -141,7 +143,7 @@ public sealed class ModelProfileService
     public async Task<ModelProfile> AddCloudProfileAsync(string profileId, string displayName, string modelId, Uri? endpoint, string apiKey, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profileId);
-        ValidateEndpoint(endpoint, profileId);
+        ValidateEndpoint(endpoint, ModelKind.Cloud, profileId);
         var secretRef = await _secrets.SetAsync($"model:{profileId}", apiKey, ct).ConfigureAwait(false);
         var profile = new ModelProfile(profileId, displayName, ModelKind.Cloud, modelId, endpoint, secretRef);
 
@@ -154,7 +156,7 @@ public sealed class ModelProfileService
     /// <summary>Adds (or replaces) a local model profile (no key).</summary>
     public async Task<ModelProfile> AddLocalProfileAsync(string profileId, string displayName, string modelId, Uri endpoint, CancellationToken ct = default)
     {
-        ValidateEndpoint(endpoint, profileId);
+        ValidateEndpoint(endpoint, ModelKind.Local, profileId);
         var profile = new ModelProfile(profileId, displayName, ModelKind.Local, modelId, endpoint);
         _profiles.RemoveAll(p => p.ProfileId == profileId);
         _profiles.Add(profile);
@@ -191,7 +193,7 @@ public sealed class ModelProfileService
             return null;
         }
 
-        if (!IsSafeEndpoint(endpoint))
+        if (!IsSafeEndpoint(endpoint, s.Kind))
         {
             return null;
         }
@@ -207,11 +209,20 @@ public sealed class ModelProfileService
 
     /// <summary>
     /// An endpoint decides where the reader's API key and every page of their book are sent, so it is
-    /// validated wherever one enters the app — not only at the UI. Only https, or http to loopback, is
-    /// accepted: plaintext http to a remote host puts the key on the wire, and any other scheme hands the
-    /// request to something that is not an OpenAI-compatible HTTP API.
+    /// validated wherever one enters the app — not only at the UI. The rule differs by kind because the
+    /// exposure does:
+    /// <list type="bullet">
+    /// <item>A <see cref="ModelKind.Cloud"/> profile carries the reader's API key, so plaintext http may
+    /// only go to this machine. Anywhere else it must be https.</item>
+    /// <item>A <see cref="ModelKind.Local"/> profile carries no key, and running Ollama on another box on
+    /// the LAN is an ordinary setup, so plaintext http to a private address is allowed. Plaintext http to
+    /// a <em>public</em> host is not: that would ship every page of the reader's book to a third party
+    /// under a label saying the model runs locally.</item>
+    /// </list>
+    /// Any scheme other than http/https is refused for both — it hands the request to something that is
+    /// not an OpenAI-compatible HTTP API.
     /// </summary>
-    internal static bool IsSafeEndpoint(Uri? endpoint)
+    internal static bool IsSafeEndpoint(Uri? endpoint, ModelKind kind)
     {
         if (endpoint is null)
         {
@@ -223,15 +234,54 @@ public sealed class ModelProfileService
             return true;
         }
 
-        return endpoint.Scheme == Uri.UriSchemeHttp && endpoint.IsLoopback;
+        if (endpoint.Scheme != Uri.UriSchemeHttp)
+        {
+            return false;
+        }
+
+        return endpoint.IsLoopback || (kind == ModelKind.Local && IsPrivateHost(endpoint));
     }
 
-    private static void ValidateEndpoint(Uri? endpoint, string profileId)
+    /// <summary>Whether a host is on the reader's own network: a private or link-local IP, or a name that
+    /// cannot resolve outside it (single label, or an mDNS/intranet suffix).</summary>
+    private static bool IsPrivateHost(Uri endpoint)
     {
-        if (!IsSafeEndpoint(endpoint))
+        if (IPAddress.TryParse(endpoint.Host, out var ip))
         {
+            if (IPAddress.IsLoopback(ip))
+            {
+                return true;
+            }
+
+            if (ip.AddressFamily == AddressFamily.InterNetwork)
+            {
+                var o = ip.GetAddressBytes();
+                return o[0] == 10                                  // 10.0.0.0/8
+                    || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)   // 172.16.0.0/12
+                    || (o[0] == 192 && o[1] == 168)                // 192.168.0.0/16
+                    || (o[0] == 169 && o[1] == 254);               // 169.254.0.0/16 link-local
+            }
+
+            return ip.IsIPv6LinkLocal || ip.IsIPv6UniqueLocal;
+        }
+
+        var host = endpoint.Host;
+        return !host.Contains('.', StringComparison.Ordinal)       // single-label intranet name
+            || host.EndsWith(".local", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".lan", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".internal", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".home.arpa", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void ValidateEndpoint(Uri? endpoint, ModelKind kind, string profileId)
+    {
+        if (!IsSafeEndpoint(endpoint, kind))
+        {
+            var allowed = kind == ModelKind.Cloud
+                ? "Use https, or http only to localhost."
+                : "Use https, or http only to localhost or an address on your own network.";
             throw new ModelConfigurationException(
-                $"Model profile '{profileId}' endpoint '{endpoint}' is not allowed. Use https, or http only to localhost.");
+                $"Model profile '{profileId}' endpoint '{endpoint}' is not allowed. {allowed}");
         }
     }
 }

@@ -54,9 +54,6 @@ Layered solution (`BabelRead.slnx`):
 The single `IChatClientFactory` seam is the only place model providers are swapped, so the UI never
 depends on any provider.
 
-See [`specs/001-document-page-translation/`](specs/001-document-page-translation/) for the full
-specification, plan, and task breakdown.
-
 ## License
 
 [MIT](LICENSE) — © 2026 Penka Alexandrova.
