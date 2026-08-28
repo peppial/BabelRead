@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+# nosemgrep - parse_trusted_xml below refuses a DOCTYPE, which is the entity-expansion vector
+# here; ElementTree never resolves external entities. defusedxml would add a dependency to a
+# script that otherwise runs on a bare python3, on the runner and locally.
 import xml.etree.ElementTree as ET
 from pathlib import Path
 

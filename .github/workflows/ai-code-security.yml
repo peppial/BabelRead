@@ -98,7 +98,8 @@ jobs:
           high = [r for r in results if sev(r) == "ERROR"]
           medium = [r for r in results if sev(r) == "WARNING"]
           build_failed = "${{ steps.build.outputs.build }}" == "fail"
-          detail = lambda r: f"`{r['path']}:{r['start']['line']}` — {r['extra'].get('message','').splitlines()[0]}"
+          detail = lambda r: (f"`{r['path']}:{r['start']['line']}` [{r.get('check_id','?').split('.')[-1]}] "
+                              f"— {r['extra'].get('message','').splitlines()[0]}")
           status = "fail" if (high or build_failed) else "pass"
           summary = "build failed (warnings are errors)" if build_failed else (
               f"{len(high)} error-severity, {len(medium)} warning-severity" if results else "clean")

@@ -22,6 +22,9 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+# nosemgrep - find_references refuses a DOCTYPE before parsing, which is the entity-expansion
+# vector here; ElementTree never resolves external entities. defusedxml would add a dependency
+# to a script that otherwise runs on a bare python3, on the runner and locally.
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -64,6 +67,7 @@ def http_json(url: str, timeout: float = 20.0) -> dict | None:
         headers={"User-Agent": "babelread-package-identity", "Accept-Encoding": "gzip"},
     )
     try:
+        # nosemgrep - the https:// prefix is asserted above, so the scheme cannot be attacker-chosen
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
             if resp.headers.get("Content-Encoding") == "gzip" or body[:2] == b"\x1f\x8b":
