@@ -22,9 +22,10 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-# nosemgrep - find_references refuses a DOCTYPE before parsing, which is the entity-expansion
-# vector here; ElementTree never resolves external entities. defusedxml would add a dependency
-# to a script that otherwise runs on a bare python3, on the runner and locally.
+# find_references refuses a DOCTYPE before parsing, which is the entity-expansion vector here;
+# ElementTree never resolves external entities. defusedxml would add a dependency to a script
+# that otherwise runs on a bare python3, on the runner and locally.
+# nosemgrep
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
