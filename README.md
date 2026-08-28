@@ -56,3 +56,11 @@ depends on any provider.
 
 See [`specs/001-document-page-translation/`](specs/001-document-page-translation/) for the full
 specification, plan, and task breakdown.
+
+## License
+
+[MIT](LICENSE) — © 2026 Penka Alexandrova.
+
+Third-party dependencies are all permissive and impose no additional conditions:
+PdfPig and xunit are Apache-2.0, VersOne.Epub is Unlicense, and Avalonia,
+CommunityToolkit.Mvvm and the `Microsoft.Extensions.*` packages are MIT.
