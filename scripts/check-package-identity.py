@@ -55,6 +55,10 @@ NEAR_NAME_DOWNLOAD_RATIO = 10
 
 
 def http_json(url: str, timeout: float = 20.0) -> dict | None:
+    # urllib will happily dereference file:// and ftp://. Every caller builds its URL from a
+    # constant https prefix, and this makes that a checked invariant rather than a convention.
+    if not url.startswith("https://"):
+        raise ValueError(f"refusing a non-https URL: {url!r}")
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "babelread-package-identity", "Accept-Encoding": "gzip"},
@@ -79,8 +83,10 @@ def find_references(root: Path) -> dict[str, set[str]]:
         if "/obj/" in str(path) or "/bin/" in str(path):
             continue
         try:
+            if b"<!DOCTYPE" in path.read_bytes()[:4096].upper():
+                raise ValueError("project file carries a DOCTYPE declaration")
             tree = ET.parse(path)
-        except ET.ParseError as exc:
+        except (ET.ParseError, ValueError, OSError) as exc:
             print(f"warning: could not parse {path}: {exc}", file=sys.stderr)
             continue
         for node in tree.iter():

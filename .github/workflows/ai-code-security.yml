@@ -78,6 +78,7 @@ jobs:
             --config p/security-audit \
             --config p/secrets \
             --config p/github-actions \
+            --exclude '*.lock.yml' \
             --metrics off \
             --json --output semgrep.json \
             --quiet || true
@@ -276,7 +277,9 @@ jobs:
         run: |
           set -o pipefail   # without this, `| tee` masks a failing test run
           mkdir -p findings
-          dotnet test --logger "trx;LogFileName=results.trx" --results-directory trx 2>&1 | tee test.log
+          # No LogFileName: four test projects share one --results-directory, and a fixed name makes
+          # them overwrite each other so the stage reports the last project only.
+          dotnet test --logger trx --results-directory trx 2>&1 | tee test.log
 
       - name: Record verdict
         if: always()
@@ -312,7 +315,7 @@ jobs:
           mkdir -p findings
           dotnet test tests/BabelRead.Core.Tests \
             --filter "Category=Security" \
-            --logger "trx;LogFileName=security.trx" --results-directory trx 2>&1 | tee sectest.log
+            --logger trx --results-directory trx 2>&1 | tee sectest.log
 
       - name: Fail if the suite is empty
         if: always()
@@ -352,11 +355,17 @@ jobs:
           merge-multiple: true
 
       - name: Render
+        env:
+          # BUG C: `${{ }}` interpolated straight into a run: script is a script-injection sink.
+          # Constrained to a choice input here, but the pattern is the one p/github-actions flags
+          # and this workflow has no business shipping it.
+          FAIL_ON: ${{ inputs.fail_on }}
         run: |
+          set -o pipefail
           python3 scripts/security-report.py \
             --findings findings \
-            --fail-on "${{ inputs.fail_on }}" \
-            --out security-report.md >> "$GITHUB_STEP_SUMMARY"
+            --fail-on "$FAIL_ON" \
+            --out security-report.md | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()

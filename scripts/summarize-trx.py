@@ -12,15 +12,25 @@ from pathlib import Path
 NS = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
 
 
-def summarize(trx_dir: Path) -> tuple[int, int, list[str]]:
-    passed = failed = 0
+def parse_trusted_xml(path: Path) -> ET.Element:
+    """Parse XML with no doctype. ElementTree does not resolve external entities, but it will
+    still expand internal ones, so a declared DOCTYPE is refused rather than expanded."""
+    head = path.read_bytes()[:4096].lstrip()
+    if b"<!DOCTYPE" in head.upper():
+        raise ValueError("refusing to parse XML carrying a DOCTYPE declaration")
+    return ET.parse(path).getroot()
+
+
+def summarize(trx_dir: Path) -> tuple[int, int, list[str], int]:
+    passed = failed = files = 0
     details: list[str] = []
     for path in sorted(trx_dir.rglob("*.trx")):
         try:
-            root = ET.parse(path).getroot()
-        except ET.ParseError as exc:
+            root = parse_trusted_xml(path)
+        except (ET.ParseError, ValueError) as exc:
             details.append(f"could not parse {path.name}: {exc}")
             continue
+        files += 1
         for result in root.iterfind(".//t:UnitTestResult", NS):
             outcome = result.get("outcome")
             if outcome == "Passed":
@@ -30,7 +40,7 @@ def summarize(trx_dir: Path) -> tuple[int, int, list[str]]:
                 message = result.findtext(".//t:Message", default="", namespaces=NS).strip()
                 first = message.splitlines()[0] if message else "no message"
                 details.append(f"`{result.get('testName', '?')}` — {first}")
-    return passed, failed, details
+    return passed, failed, details, files
 
 
 def main() -> int:
@@ -48,13 +58,16 @@ def main() -> int:
             "details": [],
         }
     else:
-        passed, failed, details = summarize(args.trx)
+        passed, failed, details, files = summarize(args.trx)
         verdict = {
             "stage": args.stage,
             "status": "fail" if failed else ("error" if passed == 0 else "pass"),
             "high": failed,
             "medium": 0,
-            "summary": f"{passed} passed, {failed} failed" if passed or failed else "no tests ran",
+            # The file count is part of the summary on purpose: results files that overwrite each
+            # other look exactly like a smaller suite, and a security gate must not hide that.
+            "summary": (f"{passed} passed, {failed} failed across {files} result file(s)"
+                        if passed or failed else "no tests ran"),
             "details": details,
         }
 
