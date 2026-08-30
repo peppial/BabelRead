@@ -1,0 +1,286 @@
+name: Release
+
+# Builds BabelRead as a self-contained, no-.NET-required package for every supported
+# platform/architecture and attaches the results to a GitHub Release.
+#
+#   push a tag v1.2.3  ->  test -> package (6 legs) -> release
+#   workflow_dispatch  ->  same, but publishing is opt-in so the packaging can be rehearsed.
+#
+# Nothing here is trimmed or AOT-compiled: Avalonia's XAML/binding stack, CommunityToolkit.Mvvm
+# and the DI container are reflection-heavy, and a trimmed build fails at the first view rather
+# than at build time. ~120 MB per artifact is the accepted price.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+      publish:
+        description: "Create the GitHub Release (off = rehearse packaging only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_NOLOGO: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  PROJECT: src/BabelRead.App/BabelRead.App.csproj
+
+jobs:
+  # ── Resolve the one version string every later job builds and names files with ──────────
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            publish=true
+          else
+            version="${{ inputs.version }}"
+            publish="${{ inputs.publish }}"
+          fi
+          # A malformed version would otherwise reach the .app plist and the file names.
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$version' is not a semantic version (expected 1.2.3 or 1.2.3-beta.1)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Building version $version (publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The gate the README documents: warnings are errors, and the tests pass ──────────────
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - run: dotnet build -warnaserror
+      - run: dotnet test --no-build
+
+  package:
+    name: ${{ matrix.rid }}
+    needs: [prepare, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, rid: win-x64 }
+          - { os: windows-latest, rid: win-arm64 }
+          - { os: ubuntu-latest, rid: linux-x64 }
+          - { os: ubuntu-latest, rid: linux-arm64 }
+          - { os: macos-latest, rid: osx-arm64 }
+          - { os: macos-latest, rid: osx-x64 }
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RID: ${{ matrix.rid }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Windows and Linux ship one executable: the native libraries are extracted at first run.
+      # macOS keeps its .dylibs beside the apphost inside the bundle, where codesign can sign them.
+      - name: Publish self-contained
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS keeps the .dylibs loose in the bundle; the other two get one file.
+          case "$RID" in
+            osx-*) extract=false ;;
+            *)     extract=true ;;
+          esac
+          dotnet publish "$PROJECT" \
+            -c Release \
+            -r "$RID" \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=$extract \
+            -p:DebugType=none \
+            -p:DebugSymbols=false \
+            -p:Version="$VERSION" \
+            -o publish
+          # SkiaSharp/HarfBuzz ship native .pdb files that DebugType=none does not suppress;
+          # they are ~100 MB of debug data no reader needs.
+          rm -f publish/*.pdb
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="stage/BabelRead-$VERSION-$RID"
+          mkdir -p "$stage" dist
+          # .NET names the apphost after the assembly; users should see the product name.
+          mv publish/BabelRead.App.exe "$stage/BabelRead.exe"
+          cp README.md LICENSE "$stage/"
+          powershell -NoProfile -Command \
+            "Compress-Archive -Path '$stage/*' -DestinationPath 'dist/BabelRead-$VERSION-$RID.zip'"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="BabelRead-$VERSION-$RID"
+          mkdir -p "stage/$dir" dist
+          mv publish/BabelRead.App "stage/$dir/BabelRead"
+          chmod +x "stage/$dir/BabelRead"
+          cp README.md LICENSE "stage/$dir/"
+          tar -czf "dist/$dir.tar.gz" -C stage "$dir"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="stage/BabelRead.app"
+          mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" dist
+          cp -R publish/ "$bundle/Contents/MacOS/"
+          mv "$bundle/Contents/MacOS/BabelRead.App" "$bundle/Contents/MacOS/BabelRead"
+
+          cat > "$bundle/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleName</key>
+            <string>BabelRead</string>
+            <key>CFBundleDisplayName</key>
+            <string>BabelRead</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.babelread.app</string>
+            <key>CFBundleExecutable</key>
+            <string>BabelRead</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$VERSION</string>
+            <key>CFBundleVersion</key>
+            <string>$VERSION</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>13.0</string>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.productivity</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSPrincipalClass</key>
+            <string>NSApplication</string>
+          </dict>
+          </plist>
+          PLIST
+
+          # Ad-hoc signature only — no Developer ID, so Gatekeeper still quarantines the
+          # download. The release notes tell readers how to clear it.
+          xattr -cr "$bundle"
+          codesign --force --deep --sign - "$bundle"
+          codesign --verify --deep --strict "$bundle"
+
+          ln -s /Applications stage/Applications
+          hdiutil create -volname BabelRead -srcfolder stage -ov -format UDZO \
+            "dist/BabelRead-$VERSION-$RID.dmg"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: BabelRead-${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [prepare, package]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./* > SHA256SUMS.txt
+          cat SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create release
+        run: |
+          set -euo pipefail
+          cat > notes.md <<NOTES
+          Self-contained builds of BabelRead $VERSION. **No .NET install is required** — download the
+          archive for your platform, unpack it, and run it.
+
+          | Platform | Download |
+          | --- | --- |
+          | Windows (Intel/AMD) | \`BabelRead-$VERSION-win-x64.zip\` |
+          | Windows (ARM) | \`BabelRead-$VERSION-win-arm64.zip\` |
+          | Linux (Intel/AMD) | \`BabelRead-$VERSION-linux-x64.tar.gz\` |
+          | Linux (ARM) | \`BabelRead-$VERSION-linux-arm64.tar.gz\` |
+          | macOS (Apple silicon) | \`BabelRead-$VERSION-osx-arm64.dmg\` |
+          | macOS (Intel) | \`BabelRead-$VERSION-osx-x64.dmg\` |
+
+          Verify a download against \`SHA256SUMS.txt\`.
+
+          ### macOS: clearing the quarantine flag
+
+          The bundle is ad-hoc signed, not notarised, so Gatekeeper refuses it after download
+          ("BabelRead is damaged"). After dragging it to Applications, run once:
+
+          \`\`\`bash
+          xattr -dr com.apple.quarantine /Applications/BabelRead.app
+          \`\`\`
+
+          ### Known limitation on Windows and Linux
+
+          Cloud API keys are **not persisted** on Windows or Linux — the secure store is currently
+          macOS Keychain only, and other platforms fall back to in-memory storage, so a key must be
+          re-entered each launch. The local (Ollama) path is unaffected and needs no key.
+
+          ### Getting started
+
+          Point BabelRead at a PDF or EPUB, then pick a model in **Settings** — a local
+          [Ollama](https://ollama.com) model for the offline, no-key path, or a cloud provider with
+          your own API key. See the [README](https://github.com/${{ github.repository }}#readme).
+          NOTES
+          gh release create "v$VERSION" \
+            --repo "${{ github.repository }}" \
+            --title "BabelRead $VERSION" \
+            --notes-file notes.md \
+            dist/*

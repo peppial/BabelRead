@@ -19,6 +19,36 @@ models (no key, offline) and cloud models (your own API key) — through the Mic
   `http://localhost:11434/v1`). Foundry Local and LM Studio work the same way.
 - For the cloud path: an OpenAI or Azure OpenAI API key, entered in **Settings**.
 
+## Download
+
+Prebuilt, self-contained packages are on the
+[releases page](https://github.com/peppial/BabelRead/releases/latest) — **no .NET install needed**.
+
+| Platform | File |
+| --- | --- |
+| Windows (Intel/AMD) | `BabelRead-<version>-win-x64.zip` |
+| Windows (ARM) | `BabelRead-<version>-win-arm64.zip` |
+| Linux (Intel/AMD) | `BabelRead-<version>-linux-x64.tar.gz` |
+| Linux (ARM) | `BabelRead-<version>-linux-arm64.tar.gz` |
+| macOS (Apple silicon) | `BabelRead-<version>-osx-arm64.dmg` |
+| macOS (Intel) | `BabelRead-<version>-osx-x64.dmg` |
+
+Check a download against the release's `SHA256SUMS.txt`.
+
+The macOS bundle is ad-hoc signed rather than notarised, so Gatekeeper refuses it after download
+("BabelRead is damaged"). Drag it to Applications, then clear the quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/BabelRead.app
+```
+
+On **Windows and Linux, cloud API keys are not persisted** — the secure store is macOS Keychain only
+today, and other platforms fall back to in-memory storage, so a key must be re-entered each launch.
+The local Ollama path needs no key and is unaffected.
+
+Releases are produced by [`.github/workflows/release.yml`](.github/workflows/release.yml): push a
+`v*` tag and every platform is built, packaged and attached to the release.
+
 ## Build, test, run
 
 ```bash
